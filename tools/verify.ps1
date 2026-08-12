@@ -110,28 +110,59 @@ if ($PublicAudit) {
         throw "Private operational paths are still tracked: $($privateTracked -join ', ')"
     }
 
-    $publicBranch = 'codex/public-ready'
-    git -c "safe.directory=$gitSafeDirectory" -C $repoRoot show-ref --verify --quiet "refs/heads/$publicBranch"
+    git -c "safe.directory=$gitSafeDirectory" -C $repoRoot show-ref --verify --quiet 'refs/heads/main'
     if ($LASTEXITCODE -ne 0) {
-        throw "Missing local publication branch: $publicBranch"
+        throw 'Missing canonical public branch: main'
     }
 
-    $publicCommitCount = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-list --count $publicBranch
-    if ($LASTEXITCODE -ne 0 -or $publicCommitCount -ne '1') {
-        throw "$publicBranch must contain exactly one root commit"
+    $publicRoots = @(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-list --max-parents=0 --all | Sort-Object -Unique)
+    if ($LASTEXITCODE -ne 0 -or $publicRoots.Count -ne 1) {
+        throw 'All local branches and tags must share exactly one public root commit'
     }
 
-    $currentTree = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-parse 'HEAD^{tree}'
-    $publicTree = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-parse "$publicBranch^{tree}"
-    if ($LASTEXITCODE -ne 0 -or $currentTree -ne $publicTree) {
-        throw "$publicBranch does not match the current verified source tree"
+    $privateHistoryPaths = @(
+        git -c "safe.directory=$gitSafeDirectory" -C $repoRoot log --all --format= --name-only -- '_Agents' 'PROJECT.md' 'artifacts/backups' 'tmp' |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+    if ($LASTEXITCODE -ne 0 -or $privateHistoryPaths) {
+        throw "Private operational paths remain in public history: $($privateHistoryPaths -join ', ')"
     }
 
     $expectedPublicEmail = 'noreply' + '@' + 'petcrew.invalid'
     $expectedPublicIdentity = "PetCrew|$expectedPublicEmail|PetCrew|$expectedPublicEmail"
-    $publicIdentity = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot show -s --format='%an|%ae|%cn|%ce' $publicBranch
-    if ($LASTEXITCODE -ne 0 -or $publicIdentity -ne $expectedPublicIdentity) {
-        throw "$publicBranch contains non-public Git author metadata"
+    $publicIdentities = @(
+        git -c "safe.directory=$gitSafeDirectory" -C $repoRoot log --all --format='%an|%ae|%cn|%ce' |
+            Sort-Object -Unique
+    )
+    if ($LASTEXITCODE -ne 0 -or $publicIdentities.Count -ne 1 -or $publicIdentities[0] -ne $expectedPublicIdentity) {
+        throw 'Public history contains non-project Git author metadata'
+    }
+
+    $configuredIdentity = "$(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local user.name)|$(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local user.email)"
+    if ($LASTEXITCODE -ne 0 -or $configuredIdentity -ne "PetCrew|$expectedPublicEmail") {
+        throw 'Repository-local Git author identity is not publication-safe'
+    }
+
+    $historySensitiveHits = @()
+    $historyCommits = @(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-list --all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not enumerate public history'
+    }
+    foreach ($commit in $historyCommits) {
+        foreach ($entry in $sensitiveContentPatterns.GetEnumerator()) {
+            $paths = @(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot grep -I -l -E -e $entry.Value $commit -- 2>$null)
+            if ($LASTEXITCODE -gt 1) {
+                throw "History scan failed at $commit ($($entry.Key))"
+            }
+            foreach ($path in $paths) {
+                $relativePath = $path.Substring($path.IndexOf(':') + 1)
+                $historySensitiveHits += "$($commit.Substring(0, 12)):$relativePath ($($entry.Key))"
+            }
+        }
+    }
+    if ($historySensitiveHits) {
+        throw "Sensitive-looking content remains in public history: $($historySensitiveHits -join ', ')"
     }
 }
 

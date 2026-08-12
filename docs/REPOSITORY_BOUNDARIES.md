@@ -47,16 +47,21 @@ architecture decisions may be curated into public documentation. Raw logs,
 machine-specific evidence, process identifiers, task identifiers, and rollout
 receipts are not part of a public release.
 
-The local `main` history predates this boundary and contains private operational
-records in old commits. It must never be pushed to a public remote. Public
-publication uses only the disconnected, single-root `codex/public-ready` branch.
-Its tree must match the verified source tree, while its author and committer
-metadata use the project identity rather than a personal name or email address.
+The canonical `main` branch starts from one audited public root and grows like a
+normal source history. Feature branches must descend from that same root. Every
+commit uses the project identity rather than a personal name or email address.
+The retired private development history is stored only as an external local
+bundle and is not a branch, tag, or object reachable from this repository.
 
-A green working-tree scan does not make another branch or an exported copy of
-the whole workspace safe to publish. Run `tools/verify.ps1 -PublicAudit` before
-every public push and push the publication branch by its explicit name. Never
-use `git push --all` for this repository.
+A green working-tree scan does not make arbitrary history or an exported copy
+of the whole workspace safe to publish. Run `tools/verify.ps1 -PublicAudit`
+before the first public push and in CI. The audit checks every local branch and
+tag for a shared public root, project-only authorship, forbidden operational
+paths, and sensitive-looking content.
+
+Normal development uses `main`, short-lived feature branches, commits, pushes,
+and pull requests. Runtime installation, rollback evidence, local coordination,
+and the retired private-history bundle remain outside public Git history.
 
 ## Release boundary
 
