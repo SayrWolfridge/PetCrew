@@ -1,0 +1,51 @@
+[package]
+name = "petcrew"
+version = "0.1.0"
+description = "Local Windows team activity companion for Codex and OpenCode"
+authors = ["PetCrew contributors"]
+edition = "2021"
+license = "MIT"
+default-run = "petcrew"
+
+[lib]
+name = "petcrew_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "petcrew"
+path = "src/main.rs"
+
+[[bin]]
+name = "petcrew-core"
+path = "src/core_main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri"]
+
+[dependencies]
+axum = "0.8"
+chrono = "0.4"
+futures-util = "0.3"
+rand = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [], optional = true }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.7", features = ["cors", "limit", "timeout"] }
+url = "2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

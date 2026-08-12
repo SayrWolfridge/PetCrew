@@ -1,0 +1,34 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/overlay/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/overlay/src-tauri
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install JavaScript dependencies
+        working-directory: apps/overlay
+        run: npm ci
+      - name: Verify repository
+        shell: powershell
+        run: .\tools\verify.ps1 -PublicAudit

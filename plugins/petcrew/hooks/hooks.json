@@ -1,0 +1,114 @@
+{
+  "description": "Best-effort sanitized Codex activity updates for the local PetCrew overlay.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "request_user_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "update_plan",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "request_user_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/petcrew_bridge.py\" hook",
+            "commandWindows": "python \"%PLUGIN_ROOT%\\scripts\\petcrew_bridge.py\" hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

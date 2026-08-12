@@ -1,0 +1,9 @@
+interface:
+  display_name: "PetCrew status"
+  short_description: "Report clear local progress to PetCrew"
+  default_prompt: "Use $petcrew-report-status to report this task progress to PetCrew."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "petcrew"
+      description: "Local PetCrew semantic status reporter"

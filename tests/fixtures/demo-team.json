@@ -1,0 +1,95 @@
+[
+  {
+    "agent_id": "codex-research",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Проверить события Codex",
+    "phase": "working",
+    "progress": { "kind": "steps", "current": 4, "total": 10, "source": "explicit" },
+    "current_action": "Проверяет PermissionRequest"
+  },
+  {
+    "agent_id": "codex-ui",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Собрать компактные карточки",
+    "phase": "working",
+    "progress": { "kind": "steps", "current": 1, "total": 3, "source": "explicit" },
+    "current_action": "Настраивает плотность списка"
+  },
+  {
+    "agent_id": "codex-architecture",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Зафиксировать архитектуру",
+    "phase": "completed",
+    "progress": { "kind": "steps", "current": 3, "total": 3, "source": "explicit" },
+    "result": "Архитектура и протокол событий подготовлены",
+    "unread": true
+  },
+  {
+    "agent_id": "codex-security",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Проверить безопасные границы",
+    "phase": "waiting_approval",
+    "progress": { "kind": "activity", "source": "inferred" },
+    "current_action": "Ждёт разрешения на локальную проверку"
+  },
+  {
+    "agent_id": "codex-docking",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Исследовать окно питомца",
+    "phase": "queued",
+    "progress": { "kind": "indeterminate", "source": "unavailable" },
+    "current_action": "Ожидает запуска"
+  },
+  {
+    "agent_id": "codex-tests",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Подготовить сценарии интерфейса",
+    "phase": "planning",
+    "progress": { "kind": "activity", "source": "explicit" },
+    "current_action": "Разбивает проверку на сценарии"
+  },
+  {
+    "agent_id": "codex-copy",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Подготовить русские статусы",
+    "phase": "working",
+    "progress": { "kind": "indeterminate", "source": "inferred" },
+    "current_action": "Сокращает технические формулировки"
+  },
+  {
+    "agent_id": "codex-navigation",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Проверить переход к задаче",
+    "phase": "blocked",
+    "progress": { "kind": "activity", "source": "explicit" },
+    "current_action": "Нет подтверждённого внешнего deep link"
+  },
+  {
+    "agent_id": "opencode-adapter",
+    "provider": "opencode",
+    "project": "PetCrew",
+    "task": "Спроектировать OpenCode-адаптер",
+    "phase": "queued",
+    "progress": { "kind": "indeterminate", "source": "unavailable" },
+    "current_action": "Запланировано после Codex MVP"
+  },
+  {
+    "agent_id": "codex-fixtures",
+    "provider": "codex",
+    "project": "PetCrew",
+    "task": "Проверить десять агентов",
+    "phase": "completed",
+    "progress": { "kind": "steps", "current": 2, "total": 2, "source": "explicit" },
+    "result": "Десять разных состояний записаны в fixture",
+    "unread": false
+  }
+]
+

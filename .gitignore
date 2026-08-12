@@ -1,0 +1,40 @@
+# JavaScript
+**/node_modules/
+**/dist/
+**/*.log
+
+# Rust / Tauri
+**/src-tauri/target/
+**/src-tauri/gen/schemas/
+
+# Python
+**/__pycache__/
+**/*.pyc
+
+# Locally built runnable artifacts
+artifacts/*.exe
+artifacts/backups/
+
+# Local operations, recovery state, and diagnostic scratch files
+tmp/
+_Agents/
+PROJECT.md
+docs/CODEX_COMPLETION_BRIDGE_HANDOFF.md
+docs/OPENCODE_COMPLETION_BRIDGE_HANDOFF.md
+docs/TZ_LIMITS_AND_REMAINING.md
+**/relay-state/
+**/hub-secret.txt
+**/hub-runtime.json
+**/hub-core.lock
+**/hub-core.lock.*
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

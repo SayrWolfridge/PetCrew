@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "petcrew": {
+      "command": "python",
+      "args": [
+        "scripts/petcrew_bridge.py",
+        "mcp"
+      ],
+      "cwd": ".",
+      "env": {
+        "PYTHONUTF8": "1"
+      },
+      "required": false,
+      "startup_timeout_sec": 3.0,
+      "tool_timeout_sec": 2.0
+    }
+  }
+}

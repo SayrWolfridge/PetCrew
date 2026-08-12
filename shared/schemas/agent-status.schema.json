@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://petcrew.local/schemas/agent-status.schema.json",
+  "title": "PetCrew Agent Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "event_id",
+    "sequence",
+    "occurred_at",
+    "provider",
+    "session_id",
+    "agent_id",
+    "event_type",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1.0" },
+    "event_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "provider": {
+      "type": "string",
+      "enum": ["codex", "opencode", "simulator"]
+    },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "agent_id": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "parent_agent_id": { "type": ["string", "null"], "maxLength": 300 },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "agent.discovered",
+        "agent.started",
+        "agent.progress",
+        "agent.activity",
+        "agent.attention_requested",
+        "agent.attention_resolved",
+        "agent.completed",
+        "agent.failed",
+        "agent.cancelled",
+        "agent.acknowledged"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project": { "$ref": "#/$defs/project" },
+        "task": { "$ref": "#/$defs/task" },
+        "phase": { "$ref": "#/$defs/phase" },
+        "progress": { "$ref": "#/$defs/progress" },
+        "change_summary": { "$ref": "#/$defs/changeSummary" },
+        "current_action": { "type": "string", "maxLength": 160 },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "raw_tool_name": { "type": ["string", "null"], "maxLength": 160 },
+        "attention": { "$ref": "#/$defs/attention" },
+        "result": { "$ref": "#/$defs/result" },
+        "navigation": { "$ref": "#/$defs/navigation" }
+      }
+    }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "path": { "type": ["string", "null"], "maxLength": 500 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "detail": { "type": ["string", "null"], "maxLength": 1000 }
+      }
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "planning",
+        "working",
+        "waiting_input",
+        "waiting_approval",
+        "blocked",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "progress": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "current", "total", "label", "source"],
+          "properties": {
+            "kind": { "const": "steps" },
+            "current": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 1 },
+            "label": { "type": "string", "maxLength": 160 },
+            "source": { "const": "explicit" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "label", "source"],
+          "properties": {
+            "kind": { "enum": ["activity", "indeterminate"] },
+            "label": { "type": "string", "maxLength": 160 },
+            "source": { "enum": ["explicit", "inferred", "unavailable"] }
+          }
+        }
+      ]
+    },
+    "changeSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "additions", "deletions", "source"],
+      "properties": {
+        "files": { "type": "integer", "minimum": 0 },
+        "additions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 },
+        "source": { "const": "provider" }
+      }
+    },
+    "attention": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "summary", "requested_at"],
+      "properties": {
+        "kind": { "enum": ["input", "approval", "blocked", "failure"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "requested_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "result": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["summary", "outcome", "completed_at", "unread"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "outcome": { "enum": ["success", "failure", "cancelled"] },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "unread": { "type": "boolean" }
+      }
+    },
+    "navigation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "label", "target"],
+      "properties": {
+        "kind": { "enum": ["task", "terminal", "folder", "provider"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }
+    }
+  }
+}
