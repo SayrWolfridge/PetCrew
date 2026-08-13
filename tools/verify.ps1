@@ -43,8 +43,9 @@ $jsonFiles = Get-ChildItem -LiteralPath $repoRoot -Recurse -File -Filter *.json 
         $_.FullName -notmatch '\\tmp\\' -and
         $_.FullName -notmatch '\\_Agents\\'
     }
-foreach ($jsonFile in $jsonFiles) {
-    $null = Get-Content -LiteralPath $jsonFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+$jsonFiles.FullName | python "$repoRoot\tools\validate_json.py"
+if ($LASTEXITCODE -ne 0) {
+    throw "JSON syntax validation failed with exit code $LASTEXITCODE"
 }
 
 Invoke-RepositoryStep "Git whitespace" $repoRoot {
