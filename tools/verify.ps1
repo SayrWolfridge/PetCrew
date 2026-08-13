@@ -34,16 +34,7 @@ Invoke-RepositoryStep "Codex bridge tests" $repoRoot { python -m unittest discov
 Invoke-RepositoryStep "OpenCode adapter tests" $repoRoot { node --test adapters\opencode\petcrew.test.mjs }
 
 Write-Host "[JSON syntax]"
-$jsonFiles = Get-ChildItem -LiteralPath $repoRoot -Recurse -File -Filter *.json |
-    Where-Object {
-        $_.FullName -notmatch '\\node_modules\\' -and
-        $_.FullName -notmatch '\\target\\' -and
-        $_.FullName -notmatch '\\dist\\' -and
-        $_.FullName -notmatch '\\artifacts\\backups\\' -and
-        $_.FullName -notmatch '\\tmp\\' -and
-        $_.FullName -notmatch '\\_Agents\\'
-    }
-$jsonFiles.FullName | python "$repoRoot\tools\validate_json.py"
+python "$repoRoot\tools\validate_json.py" $repoRoot
 if ($LASTEXITCODE -ne 0) {
     throw "JSON syntax validation failed with exit code $LASTEXITCODE"
 }
