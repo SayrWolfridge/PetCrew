@@ -20,6 +20,7 @@ PetCrew состоит из пользовательского приложен�
 - [Архитектура](ARCHITECTURE.md)
 - [Протокол событий](EVENT_PROTOCOL.md)
 - [Границы безопасности](SECURITY.md)
+- [Лицензирование](LICENSING.md)
 - [Подключение нового провайдера](NEW_PROVIDER_INTEGRATION.md)
 - [Контракт плагина Codex](CODEX_PLUGIN_CONTRACT.md)
 - [Контракт плагина OpenCode](OPENCODE_PLUGIN_CONTRACT.md)

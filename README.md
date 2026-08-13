@@ -96,6 +96,7 @@ configuration, register scheduled tasks, or start background services. See
 - [Architecture](docs/ARCHITECTURE.md)
 - [Event protocol](docs/EVENT_PROTOCOL.md)
 - [Security boundaries](docs/SECURITY.md)
+- [Licensing](docs/LICENSING.md)
 - [Installation and rollback](docs/INSTALLATION.md)
 - [Codex plugin contract](docs/CODEX_PLUGIN_CONTRACT.md)
 - [OpenCode plugin contract](docs/OPENCODE_PLUGIN_CONTRACT.md)
@@ -111,4 +112,6 @@ source correctness.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+PetCrew source is licensed under MIT. Third-party dependencies and tools keep
+their own licenses. See [LICENSE](LICENSE), [Licensing](docs/LICENSING.md), and
+[Third-party notices](THIRD_PARTY_NOTICES.md).
