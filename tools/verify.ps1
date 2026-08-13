@@ -103,7 +103,10 @@ if ($PublicAudit) {
     }
 
     git -c "safe.directory=$gitSafeDirectory" -C $repoRoot show-ref --verify --quiet 'refs/heads/main'
-    if ($LASTEXITCODE -ne 0) {
+    $hasLocalMain = $LASTEXITCODE -eq 0
+    git -c "safe.directory=$gitSafeDirectory" -C $repoRoot show-ref --verify --quiet 'refs/remotes/origin/main'
+    $hasRemoteMain = $LASTEXITCODE -eq 0
+    if (-not $hasLocalMain -and -not $hasRemoteMain) {
         throw 'Missing canonical public branch: main'
     }
 
