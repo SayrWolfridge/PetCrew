@@ -8,7 +8,7 @@ from pathlib import Path
 def main() -> int:
     failed = False
     for raw_path in sys.stdin:
-        path_text = raw_path.rstrip("\r\n")
+        path_text = raw_path.rstrip("\r\n").lstrip("\ufeff")
         if not path_text:
             continue
 
