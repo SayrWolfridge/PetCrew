@@ -131,8 +131,15 @@ if ($PublicAudit) {
         throw 'Public history contains non-project Git author metadata'
     }
 
-    $configuredIdentity = "$(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local user.name)|$(git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local user.email)"
-    if ($LASTEXITCODE -ne 0 -or $configuredIdentity -ne "PetCrew|$expectedPublicEmail") {
+    $configuredName = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local --get user.name 2>$null
+    $configuredNameStatus = $LASTEXITCODE
+    $configuredEmail = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot config --local --get user.email 2>$null
+    $configuredEmailStatus = $LASTEXITCODE
+    if ($configuredNameStatus -gt 1 -or $configuredEmailStatus -gt 1) {
+        throw 'Could not inspect repository-local Git author identity'
+    }
+    $hasConfiguredIdentity = $configuredNameStatus -eq 0 -or $configuredEmailStatus -eq 0
+    if ($hasConfiguredIdentity -and "$configuredName|$configuredEmail" -ne "PetCrew|$expectedPublicEmail") {
         throw 'Repository-local Git author identity is not publication-safe'
     }
 
