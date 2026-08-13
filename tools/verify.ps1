@@ -165,4 +165,5 @@ if ($PublicAudit) {
     }
 }
 
+$global:LASTEXITCODE = 0
 Write-Host "PetCrew verification passed."
