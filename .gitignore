@@ -14,6 +14,7 @@
 # Locally built runnable artifacts
 artifacts/*.exe
 artifacts/backups/
+artifacts/releases/
 
 # Local operations, recovery state, and diagnostic scratch files
 tmp/

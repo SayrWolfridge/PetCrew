@@ -19,6 +19,18 @@ release build of the desktop binary does not package Tauri's production web
 assets correctly. `cargo build --release --bin petcrew-core` may be used for the
 headless Core after the Rust test suite passes.
 
+For the bounded Windows alpha installer, use the repository-level release
+wrapper instead:
+
+```powershell
+.\tools\build-windows-alpha.ps1
+```
+
+It builds the Monitor and standalone Core together, invokes the pinned Tauri
+NSIS bundler, and writes the installer plus its manifest and checksums only to
+the ignored release-artifact directory. See
+[Windows alpha installer contract](WINDOWS_ALPHA_INSTALLER.md).
+
 Build output is local. Do not commit executables, runtime descriptors, lock
 files, secrets, caches, or rollback archives.
 
@@ -72,10 +84,13 @@ snapshots, and diagnostic scratch data also belong in a separate machine-local
 operations directory outside the repository.
 
 Scheduled tasks or other autostart mechanisms are machine-local operations.
-They are not created by the repository build and must have their own exact
-backup, configuration diff, health check, and rollback plan. Their executable
-and working-directory fields must both point to the external installation
-directory.
+They are not created by an ordinary repository build. The Windows alpha
+installer is the single documented exception: it registers only the exact
+current-user `PetCrew Core` task through the installed Core executable and its
+uninstaller removes that same task. Manual and developer installations still
+require their own exact backup, configuration diff, health check, and rollback
+plan. Executable and working-directory fields must both point to the external
+installation directory.
 
 ## Acceptance
 

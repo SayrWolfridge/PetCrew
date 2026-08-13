@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "PetCrew contributors",
+    "homepage": "https://github.com/SayrWolfridge/PetCrew",
+    "copyright": "Copyright (c) 2026 PetCrew contributors",
+    "license": "MIT",
+    "licenseFile": "../../../LICENSE",
+    "category": "Utility",
+    "shortDescription": "Local Windows companion for observing AI agent activity",
+    "resources": {
+      "../../../LICENSE": "licenses/LICENSE.txt",
+      "../../../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "target/release/THIRD-PARTY-LICENSES.txt": "licenses/THIRD-PARTY-LICENSES.txt"
+    },
+    "useLocalToolsDir": true,
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "startMenuFolder": "PetCrew",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "installer/windows/hooks.nsh"
+      }
+    }
+  }
+}

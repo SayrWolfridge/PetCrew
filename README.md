@@ -98,6 +98,7 @@ configuration, register scheduled tasks, or start background services. See
 - [Security boundaries](docs/SECURITY.md)
 - [Licensing](docs/LICENSING.md)
 - [Installation and rollback](docs/INSTALLATION.md)
+- [Windows alpha installer](docs/WINDOWS_ALPHA_INSTALLER.md)
 - [Codex plugin contract](docs/CODEX_PLUGIN_CONTRACT.md)
 - [OpenCode plugin contract](docs/OPENCODE_PLUGIN_CONTRACT.md)
 - [Adding a provider](docs/NEW_PROVIDER_INTEGRATION.md)

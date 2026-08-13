@@ -1,3 +1,4 @@
+pub mod autostart;
 mod core_ownership;
 mod hub;
 mod settings;
