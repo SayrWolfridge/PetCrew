@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused improvement to PetCrew
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should PetCrew solve?
+      description: Describe the user situation before proposing an interface.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Explain what should become easier or more reliable.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Privacy and approval boundary
+      description: Note whether the idea reads task data, persists content, or performs provider actions.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional existing workflow or narrower approach.

@@ -11,6 +11,8 @@ From `apps/overlay`:
 npm ci
 npm test -- --run
 npm run build
+$env:CARGO_BUILD_JOBS = '2'
+(Get-Process -Id $PID).PriorityClass = 'BelowNormal'
 npm run tauri:build
 ```
 
@@ -19,8 +21,35 @@ release build of the desktop binary does not package Tauri's production web
 assets correctly. `cargo build --release --bin petcrew-core` may be used for the
 headless Core after the Rust test suite passes.
 
-Build output is local. Do not commit executables, runtime descriptors, lock
-files, secrets, caches, or rollback archives.
+Build output is local. Do not commit executables, runtime descriptors, runtime
+lock files, secrets, caches, or rollback archives. Keep dependency lockfiles
+(`package-lock.json` and `Cargo.lock`) committed with the source.
+
+Run one native build at a time on an interactive workstation. Keep the process
+priority and Cargo job limit above for inherited compiler processes. Preserve
+valid build caches during ordinary iteration.
+
+## Build reproducibility
+
+Use an exact committed source revision with both lockfiles intact. A fresh
+checkout or Git archive must contain no copied `node_modules`, `dist` or Rust
+`target` directory, personal plugin configuration, credentials or runtime state.
+Record the source revision and the installed Node/npm, Rust/MSVC and Python
+versions before running the commands above. Use the same canonical Tauri route;
+an archive does not need Git for the native build itself.
+
+For a deliberate clean-target check, give that isolated candidate its own empty
+Cargo target directory. Do not delete a working checkout's target cache. Record
+whether package registries, toolchains and user profiles were shared with the
+development machine. A successful build in a second directory proves that the
+source does not depend on the original checkout or copied compiled artifacts;
+it does not prove a second computer or a clean user profile works.
+
+Second-computer acceptance requires the documented prerequisites on that
+computer, dependency restoration from the lockfiles, a successful native build,
+and recorded output hashes. Launching the resulting application and activating
+connectors are separate runtime acceptance steps. Do not copy live secrets or
+installations merely to make the build pass.
 
 ## Codex plugin
 
@@ -58,6 +87,58 @@ repository. Before copying it to a supported OpenCode plugin directory:
 
 Do not create a second OpenCode server, wrapper, portable runtime, or alternate
 configuration to conceal a failed standard installation route.
+
+## Bridge and Relay
+
+The repository source candidate is `plugins/opencode-bridge/`. It is distinct
+from every installed plugin cache and from the machine-local services and state
+that run it. Editing or testing this directory does not deploy it.
+
+The repository's `.agents/plugins/marketplace.json` lists both `petcrew` and
+`opencode-bridge` as independently available local plugins. Register the source
+repository through the normal Codex plugin installation flow when activation
+is approved; the catalog file itself neither installs a plugin nor starts a service.
+For an existing installation, review the current marketplace/plugin identity
+before changing its source so the update does not create a duplicate installation.
+
+The module boundaries are:
+
+- the source directory contains the MCP entry point, Relay code, skills, and
+  tests;
+- an installed plugin cache is the copy discovered by Codex and must be changed
+  only through an audited registration or update operation;
+- the external OpenCode server accepts Bridge requests on an authenticated
+  loopback endpoint;
+- the Codex reader exposes the supported local read path used to correlate an
+  exact target task; it is separate from the writer used for foreground sends;
+- the Relay queue owns durable pending/completion delivery state and must keep
+  working independently of the Monitor window;
+- PetCrew Core owns the authenticated event feed and visible retained status,
+  not task submission or provider result routing.
+
+Before any activation or source-registration change:
+
+1. Run `python -B -m unittest discover -s plugins/opencode-bridge/tests` from
+   the repository root.
+2. Review `.codex-plugin/plugin.json`, `.mcp.json`, the skill files, relative
+   resource paths, loopback endpoints, and the exact installed destination.
+3. Record hashes of the source candidate and current installed cache, and back
+   up the current registration, task action, and Relay state needed for rollback.
+4. Show the exact registration/task diff, restart impact, health checks, and
+   rollback commands before applying them.
+5. After activation, verify the installed hashes, task state, loopback listeners,
+   authenticated health, queue recovery, and one exact end-to-end return.
+
+The candidate in this repository is not deployed by the build or canonical
+verifier. A successful native foreground Codex canary proves only that the
+supported send path can create a turn and return its answer. It does not prove
+that the background reader and Relay queue will discover, claim, deliver, and
+recover that result automatically.
+
+No portable Bridge service installer is provided by this candidate. Do not
+edit an installed cache in place, copy secrets into source, or create a second
+server or Relay as a fallback. Registration and service changes require their
+own explicit installation gate and rollback evidence.
 
 ## Runtime services
 

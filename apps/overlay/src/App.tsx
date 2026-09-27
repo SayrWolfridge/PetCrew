@@ -9,19 +9,28 @@ import {
   beginWindowResize,
   closePetCrew,
   Pet,
+  ProjectGroup,
 } from "./components";
 import {
   acknowledgeHubAgent,
+  cleanupOrphanToolAppServers,
   getHubConnection,
   getHubSnapshot,
+  getRelayHealth,
+  inspectCodexPressure,
   openCodexThread,
   openOpenCodeProject,
+  recoverRelay,
+  restartCodexDesktop,
+  resetHubMonitor,
   subscribeToHub,
 } from "./hub";
 import {
   advanceSimulation,
   DEFAULT_RECENT_COMPLETED,
   densityForCount,
+  filterAgentsByTeamStatus,
+  groupAgentsByProject,
   selectLiveAgents,
   selectUnreadSubagents,
   selectUnreadTerminalAgents,
@@ -29,11 +38,24 @@ import {
   teamCounts,
   teamMood,
 } from "./model";
+import {
+  agentDisclosureKey,
+  LIST_DISCLOSURE_STORAGE_KEY,
+  parseListDisclosure,
+  serializeListDisclosure,
+  toggleCardDisclosure,
+  toggleProjectDisclosure,
+} from "./list-disclosure";
+import type { ListDisclosureState } from "./list-disclosure";
+import type { TeamStatusFilter } from "./model";
 import type {
   DemoAgent,
   HubConnection,
   HubSnapshot,
 } from "./types";
+import { performPickup } from "./return-pickup";
+import { codexPressureGuidance, requestCodexRestart } from "./codex-restart";
+import { CodexRestartControl } from "./codex-restart-control";
 import {
   DEFAULT_PREFERENCES,
   getAppSettings,
@@ -46,6 +68,7 @@ import {
   preferredSmallMonitorPlacement,
   restorableWindowRect,
 } from "./window-placement";
+import { scrollTargetFromWheel } from "./wheel-scroll";
 
 const ORIGINAL_TEAM = fixture as DemoAgent[];
 const TEAM_SIZES = [1, 3, 10] as const;
@@ -56,6 +79,7 @@ const TEXT_SIZES: TextSize[] = ["normal", "large", "extra_large"];
 
 type SourceMode = "fixture" | "hub";
 type HubStatus = "unavailable" | "connecting" | "online" | "error";
+type RelayStatus = "unknown" | "checking" | "ready" | "unavailable" | "recovering" | "error";
 
 const HUB_STATUS_TEXT: Record<HubStatus, string> = {
   unavailable: "hub недоступен",
@@ -79,6 +103,14 @@ function loadRecentCompletedLimit(): number {
   }
 }
 
+function loadListDisclosure(): ListDisclosureState {
+  try {
+    return parseListDisclosure(window.localStorage.getItem(LIST_DISCLOSURE_STORAGE_KEY));
+  } catch {
+    return parseListDisclosure(null);
+  }
+}
+
 function hubErrorMessage(error: unknown): string {
   const code = error instanceof Error ? error.message : "unknown_error";
   const label: Record<string, string> = {
@@ -99,6 +131,8 @@ export default function App() {
   const [cardLayout, setCardLayout] = useState<CardLayout>(DEFAULT_PREFERENCES.card_layout);
   const [theme, setTheme] = useState<AppTheme>(DEFAULT_PREFERENCES.theme);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [teamFilter, setTeamFilter] = useState<TeamStatusFilter | null>(null);
+  const [listDisclosure, setListDisclosure] = useState<ListDisclosureState>(loadListDisclosure);
   const [source, setSource] = useState<SourceMode>(isTauri() ? "hub" : "fixture");
   const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
@@ -106,7 +140,14 @@ export default function App() {
   const [hubConnection, setHubConnection] = useState<HubConnection | null>(null);
   const [hubStatus, setHubStatus] = useState<HubStatus>(isTauri() ? "connecting" : "unavailable");
   const [hubMessage, setHubMessage] = useState("");
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>("unknown");
+  const [codexRestarting, setCodexRestarting] = useState(false);
+  const [codexInspecting, setCodexInspecting] = useState(false);
+  const [codexCleaning, setCodexCleaning] = useState(false);
+  const [codexSuspectedThreadId, setCodexSuspectedThreadId] = useState<string | null>(null);
   const [clockNow, setClockNow] = useState(Date.now);
+  const agentListRef = useRef<HTMLDivElement>(null);
+  const settingsPanelRef = useRef<HTMLDivElement>(null);
   const preferencesRef = useRef<Preferences>(DEFAULT_PREFERENCES);
   const preferenceSaveRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -120,6 +161,14 @@ export default function App() {
     [selectedTeam, recentCompletedLimit],
   );
   const visibleAgents = selection.agents;
+  const filteredAgents = useMemo(
+    () => filterAgentsByTeamStatus(visibleAgents, teamFilter),
+    [visibleAgents, teamFilter],
+  );
+  const projectGroups = useMemo(
+    () => groupAgentsByProject(filteredAgents),
+    [filteredAgents],
+  );
   const unreadResults = useMemo(
     () => selectUnreadTerminalAgents(selectedTeam),
     [selectedTeam],
@@ -132,14 +181,64 @@ export default function App() {
     selection.overflowCount,
     source === "hub" ? hubSnapshot.overflow : 0,
   );
-  const density = densityForCount(visibleAgents.length);
+  const density = densityForCount(filteredAgents.length);
   const counts = teamCounts(visibleAgents);
   const mood = teamMood(visibleAgents);
+
+  const toggleTeamFilter = (filter: TeamStatusFilter) => {
+    setTeamFilter((current) => (current === filter ? null : filter));
+  };
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        LIST_DISCLOSURE_STORAGE_KEY,
+        serializeListDisclosure(listDisclosure),
+      );
+    } catch {
+      // Disclosure still works for this run when local storage is unavailable.
+    }
+  }, [listDisclosure]);
+
+  useEffect(() => {
+    const list = agentListRef.current;
+    if (!list) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!scrollTargetFromWheel(list, event.deltaY, event.deltaMode)) return;
+      event.preventDefault();
+    };
+    list.addEventListener("wheel", handleWheel, { passive: false });
+    return () => list.removeEventListener("wheel", handleWheel);
+  }, [filteredAgents.length]);
+
+  useEffect(() => {
+    const panel = settingsPanelRef.current;
+    if (!panel) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!scrollTargetFromWheel(panel, event.deltaY, event.deltaMode)) return;
+      event.preventDefault();
+    };
+    panel.addEventListener("wheel", handleWheel, { passive: false });
+    return () => panel.removeEventListener("wheel", handleWheel);
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || !isTauri() || relayStatus !== "unknown") return;
+    setRelayStatus("checking");
+    void getRelayHealth()
+      .then((health) => setRelayStatus(health.healthy ? "ready" : "unavailable"))
+      .catch((error: unknown) => {
+        console.error("Не удалось проверить PetCrew Relay", error);
+        setRelayStatus("error");
+      });
+  }, [settingsOpen, relayStatus]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -301,6 +400,103 @@ export default function App() {
     setSource(nextSource);
   };
 
+  const restoreRelay = () => {
+    if (!isTauri() || relayStatus === "recovering") return;
+    const confirmed = window.confirm(
+      "Перезапустить PetCrew Relay? Текущая работа OpenCode может прерваться.",
+    );
+    if (!confirmed) return;
+    setRelayStatus("recovering");
+    setHubMessage("Восстанавливаю PetCrew Relay…");
+    void recoverRelay()
+      .then((health) => {
+        setRelayStatus(health.healthy ? "ready" : "unavailable");
+        setHubMessage(health.healthy ? "PetCrew Relay восстановлен" : "Relay запущен не полностью");
+      })
+      .catch((error: unknown) => {
+        console.error("Не удалось восстановить PetCrew Relay", error);
+        setRelayStatus("error");
+        setHubMessage(error instanceof Error ? error.message : "Не удалось восстановить PetCrew Relay");
+      });
+  };
+
+  const restartCodex = () => {
+    if (!isTauri() || codexRestarting) return;
+    let targetedPid: number | null = null;
+    void requestCodexRestart(
+      (message) => window.confirm(message),
+      async () => {
+        const result = await restartCodexDesktop();
+        if (result.route === "targeted_attempt") targetedPid = result.target_pid;
+      },
+      () => {
+        setCodexRestarting(true);
+        setHubMessage("Сохраняю снимок и аварийно восстанавливаю Codex…");
+      },
+    )
+      .then((outcome) => {
+        if (outcome === "restarted") setHubMessage(targetedPid !== null
+          ? `Завершён зависший дочерний процесс ${targetedPid}; проверьте, отвечает ли Codex. Снимок сохранён в диагностике PetCrew.`
+          : "Codex снова открыт; проверьте незавершённые задачи. Снимок сохранён в диагностике PetCrew.");
+      })
+      .catch((error: unknown) => {
+        console.error("Не удалось перезапустить Codex", error);
+        setHubMessage(error instanceof Error ? error.message : "Не удалось перезапустить Codex");
+      })
+      .finally(() => setCodexRestarting(false));
+  };
+
+  const inspectCodex = () => {
+    if (!isTauri() || codexInspecting || codexRestarting || codexCleaning) return;
+    setCodexInspecting(true);
+    setHubMessage("Проверяю текущую нагрузку Codex…");
+    void inspectCodexPressure()
+      .then((result) => {
+        const guidance = codexPressureGuidance(result);
+        setCodexSuspectedThreadId(guidance.suspectedThreadId);
+        setHubMessage(guidance.message);
+      })
+      .catch((error: unknown) => {
+        console.error("Не удалось проверить нагрузку Codex", error);
+        setHubMessage(error instanceof Error ? error.message : "Не удалось проверить нагрузку Codex");
+      })
+      .finally(() => setCodexInspecting(false));
+  };
+
+  const openSuspectedCodexThread = () => {
+    if (!codexSuspectedThreadId) return;
+    void openCodexThread(codexSuspectedThreadId)
+      .then(() => setHubMessage(
+        `Открыта задача ${codexSuspectedThreadId}. Остановите её текущий ход в Codex; Monitor не завершает его автоматически.`,
+      ))
+      .catch((error: unknown) => {
+        console.error("Не удалось открыть зацикленную задачу Codex", error);
+        setHubMessage(error instanceof Error ? error.message : "Не удалось открыть задачу Codex");
+      });
+  };
+
+  const cleanupCodexOrphans = () => {
+    if (!isTauri() || codexCleaning || codexInspecting || codexRestarting) return;
+    setCodexCleaning(true);
+    setHubMessage("Проверяю сиротские tool-серверы Codex…");
+    void cleanupOrphanToolAppServers()
+      .then((result) => {
+        if (result.terminated_pids.length === 0) {
+          setHubMessage("Доказанных сиротских tool-серверов нет; ничего не завершено.");
+          return;
+        }
+        setHubMessage(
+          `Завершены сиротские tool-серверы: ${result.terminated_pids.join(", ")}. `
+          + "Диагностический снимок сохранён.",
+        );
+      })
+      .catch((error: unknown) => {
+        console.error("Не удалось очистить сиротские tool-серверы Codex", error);
+        setHubMessage(error instanceof Error ? error.message : "Не удалось очистить сиротские tool-серверы Codex");
+      })
+      .finally(() => setCodexCleaning(false));
+  };
+
   const savePreferences = (next: Preferences) => {
     preferencesRef.current = next;
     setTextSize(next.text_size);
@@ -438,6 +634,18 @@ export default function App() {
     await acknowledgeMany([agent], "Результаты");
   };
 
+  const clearMonitor = async () => {
+    if (!hubConnection) return;
+    try {
+      const snapshot = await resetHubMonitor(hubConnection);
+      setHubSnapshot(snapshot);
+      setHubMessage("Монитор очищен");
+    } catch (error) {
+      console.error("Не удалось очистить Monitor", error);
+      setHubMessage("Не удалось очистить монитор");
+    }
+  };
+
   const openAgent = async (agent: DemoAgent) => {
     try {
       if (agent.navigation?.kind === "task") {
@@ -453,6 +661,49 @@ export default function App() {
         ? "Не удалось открыть проект в OpenCode"
         : "Не удалось открыть задачу в Codex");
     }
+  };
+
+  const pickupReturn = async (agent: DemoAgent) => {
+    const outcome = await performPickup(
+      agent,
+      (prompt) => navigator.clipboard.writeText(prompt),
+      openCodexThread,
+    );
+    if (outcome === "copy_failed") {
+      setHubMessage("Не удалось скопировать запрос; задача не открыта");
+    } else if (outcome === "opened") {
+      setHubMessage("Запрос скопирован — вставьте его в открытую задачу Codex");
+    } else if (outcome === "open_failed") {
+      setHubMessage("Запрос скопирован, но задачу не удалось открыть");
+    }
+  };
+
+  const toggleProject = (project: string) => {
+    setListDisclosure((current) => toggleProjectDisclosure(current, project));
+  };
+
+  const toggleCard = (agent: DemoAgent) => {
+    setListDisclosure((current) => toggleCardDisclosure(current, agent));
+  };
+
+  const expandVisibleList = () => {
+    setListDisclosure((current) => {
+      const collapsedProjects = new Set(current.collapsedProjects);
+      const expandedCards = new Set(current.expandedCards);
+      for (const group of projectGroups) collapsedProjects.delete(group.project);
+      for (const agent of filteredAgents) expandedCards.add(agentDisclosureKey(agent));
+      return { collapsedProjects, expandedCards };
+    });
+  };
+
+  const collapseVisibleList = () => {
+    setListDisclosure((current) => {
+      const collapsedProjects = new Set(current.collapsedProjects);
+      const expandedCards = new Set(current.expandedCards);
+      for (const group of projectGroups) collapsedProjects.add(group.project);
+      for (const agent of filteredAgents) expandedCards.delete(agentDisclosureKey(agent));
+      return { collapsedProjects, expandedCards };
+    });
   };
 
   const hubPort = hubConnection ? new URL(hubConnection.endpoint).port : "—";
@@ -523,10 +774,10 @@ export default function App() {
         <Pet mood={mood} />
         <div className="overview__content">
           <div className="summary">
-            <div><strong>{counts.working}</strong><span>работают</span></div>
-            <div><strong>{counts.waiting}</strong><span>ждут</span></div>
-            <div><strong>{counts.done}</strong><span>готовы</span></div>
-            <div title="Заблокированные агенты и непрочитанные ошибки"><strong>{counts.blocked}</strong><span>проблемы</span></div>
+            <button className={teamFilter === "working" ? "is-active" : ""} type="button" aria-pressed={teamFilter === "working"} onClick={() => toggleTeamFilter("working")}><strong>{counts.working}</strong><span>работают</span></button>
+            <button className={teamFilter === "waiting" ? "is-active" : ""} type="button" aria-pressed={teamFilter === "waiting"} onClick={() => toggleTeamFilter("waiting")}><strong>{counts.waiting}</strong><span>ждут</span></button>
+            <button className={teamFilter === "done" ? "is-active" : ""} type="button" aria-pressed={teamFilter === "done"} onClick={() => toggleTeamFilter("done")}><strong>{counts.done}</strong><span>готовы</span></button>
+            <button className={teamFilter === "blocked" ? "is-active" : ""} type="button" aria-pressed={teamFilter === "blocked"} title="Заблокированные агенты и непрочитанные ошибки" onClick={() => toggleTeamFilter("blocked")}><strong>{counts.blocked}</strong><span>проблемы</span></button>
           </div>
           <div className="quick-controls" aria-label="Вид PetCrew">
             <div className="segmented" aria-label="Расположение карточек">
@@ -568,7 +819,7 @@ export default function App() {
           </div>
 
           {settingsOpen ? (
-            <div className="settings-panel" aria-label="Настройки PetCrew">
+            <div ref={settingsPanelRef} className="settings-panel" aria-label="Настройки PetCrew">
               <div className="source-control">
                 <span className="control-label">источник</span>
                 <div className="segmented">
@@ -584,6 +835,57 @@ export default function App() {
                   ))}
                 </select>
               </label>
+              {isTauri() ? (
+                <div className="relay-control">
+                  <div>
+                    <span className="control-label">PetCrew Relay</span>
+                    <span className={`relay-state relay-state--${relayStatus}`}>
+                      {relayStatus === "ready" ? "работает" : null}
+                      {relayStatus === "checking" ? "проверяю…" : null}
+                      {relayStatus === "recovering" ? "восстанавливаю…" : null}
+                      {relayStatus === "unavailable" ? "не отвечает" : null}
+                      {relayStatus === "error" ? "нужна проверка" : null}
+                      {relayStatus === "unknown" ? "не проверен" : null}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={relayStatus === "recovering" || relayStatus === "checking"}
+                    onClick={restoreRelay}
+                  >
+                    Восстановить Relay
+                  </button>
+                </div>
+              ) : null}
+              {isTauri() ? (
+                <CodexRestartControl
+                  busy={codexRestarting}
+                  inspecting={codexInspecting}
+                  cleaning={codexCleaning}
+                  suspectedThreadId={codexSuspectedThreadId}
+                  onInspect={inspectCodex}
+                  onCleanup={cleanupCodexOrphans}
+                  onOpenSuspected={openSuspectedCodexThread}
+                  onRestart={restartCodex}
+                />
+              ) : null}
+              {source === "hub" ? (
+                <div className="monitor-reset-control">
+                  <div>
+                    <span className="control-label">карточки Monitor</span>
+                    <span className="monitor-reset-hint">Задачи и Relay останутся</span>
+                  </div>
+                  <button
+                    className="danger"
+                    type="button"
+                    disabled={!hubConnection || selectedTeam.length === 0}
+                    title="Убрать все карточки, включая ошибки"
+                    onClick={() => void clearMonitor()}
+                  >
+                    Очистить всё
+                  </button>
+                </div>
+              ) : null}
               {source === "fixture" ? (
                 <div className="demo-settings">
                   <div className="segmented">
@@ -608,7 +910,9 @@ export default function App() {
           <div>
             <span className="eyebrow">{source === "hub" ? "живой снимок" : "вся стая"}</span>
             <h2>
-              {visibleAgents.length === selectedTeam.length
+              {teamFilter !== null
+                ? `${filteredAgents.length} из ${visibleAgents.length}`
+                : visibleAgents.length === selectedTeam.length
                 ? `${visibleAgents.length} агентов`
                 : `${visibleAgents.length} из ${selectedTeam.length}`}
             </h2>
@@ -632,6 +936,16 @@ export default function App() {
             >
               Прочитать субагентов
             </button>
+            {cardLayout === "list" ? (
+              <div className="list-disclosure-actions" aria-label="Раскрытие списка по проектам">
+                <button className="team__action" type="button" onClick={expandVisibleList}>
+                  Раскрыть всё
+                </button>
+                <button className="team__action" type="button" onClick={collapseVisibleList}>
+                  Свернуть всё
+                </button>
+              </div>
+            ) : null}
             <span className="density">плотность: {density === "detailed" ? "подробная" : density === "compact" ? "компактная" : "плотная"}</span>
           </div>
         </div>
@@ -649,28 +963,51 @@ export default function App() {
           </div>
         ) : null}
 
-        {source === "hub" && visibleAgents.length === 0 ? (
+        {teamFilter !== null && filteredAgents.length === 0 && visibleAgents.length > 0 ? (
+          <div className="empty-state">
+            <strong>В этой группе пока никого</strong>
+            <span>Нажмите выбранный счётчик ещё раз, чтобы показать всех.</span>
+          </div>
+        ) : source === "hub" && visibleAgents.length === 0 ? (
           <div className="empty-state">
             <strong>Ждёт живые события Codex</strong>
             <span>Новая задача или явный статус появятся здесь автоматически.</span>
           </div>
         ) : (
           <div
+            ref={agentListRef}
             className={`agent-list agent-list--${density} agent-list--${cardLayout}`}
             role="region"
             aria-label="Прокручиваемый список агентов"
             tabIndex={0}
           >
-            {visibleAgents.map((agent) => (
-              <AgentCard
-                key={agent.key ?? agent.agent_id}
-                agent={agent}
-                density={density}
-                onAcknowledge={acknowledge}
-                onOpen={openAgent}
-                nowMillis={clockNow}
-              />
-            ))}
+            {cardLayout === "list"
+              ? projectGroups.map((group) => (
+                <ProjectGroup
+                  key={group.project}
+                  group={group}
+                  density={density}
+                  collapsed={listDisclosure.collapsedProjects.has(group.project)}
+                  expandedCardKeys={listDisclosure.expandedCards}
+                  onToggleProject={() => toggleProject(group.project)}
+                  onToggleCard={toggleCard}
+                  onAcknowledge={acknowledge}
+                  onOpen={openAgent}
+                  onPickup={pickupReturn}
+                  nowMillis={clockNow}
+                />
+              ))
+              : filteredAgents.map((agent) => (
+                <AgentCard
+                  key={agentDisclosureKey(agent)}
+                  agent={agent}
+                  density={density}
+                  onAcknowledge={acknowledge}
+                  onOpen={openAgent}
+                  onPickup={pickupReturn}
+                  nowMillis={clockNow}
+                />
+              ))}
           </div>
         )}
       </section>

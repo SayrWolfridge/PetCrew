@@ -28,6 +28,27 @@ global OpenCode plugin directory.
   it accepts `opencode://open-project?directory=...` and `opencode://new-session?directory=...`,
   but no exact session-resume deep link. PetCrew therefore opens the existing project and labels
   the action accordingly.
+- On 2026-09-25, the installed OpenCode Desktop 1.18.32 and exact upstream `v1.18.32` source were
+  checked again. The deep-link contract is unchanged: `open-project` accepts only the directory.
+  Desktop handles deep links through `second-instance` but drops the initial Windows argument on a
+  cold launch. PetCrew determines cold versus warm state by probing the exact executable path
+  before dispatch, then replays the same validated URI once after cold-start readiness. The
+  spawned Electron launcher's lifetime is not a valid proxy because it can exit before Desktop is
+  ready.
+- Live tracing on 2026-09-25 found a separate OpenCode 1.18.32 new-layout regression: the main
+  process receives the replayed `open-project` URI, but the renderer subscribes to that event only
+  from `LegacyLayout`. With `newLayoutDesigns=true`, the visible tab and project therefore remain
+  unchanged. The same omission is still present in upstream `dev` at
+  `adee738d1e4597a2d0d317ca61a1625eff289efa`.
+- On 2026-09-26, Lisa accepted a bounded Windows accessibility compatibility route for the retired
+  legacy layout. After the supported deep-link dispatch, PetCrew identifies exactly one visible
+  `OpenCode` window belonging to the verified standard executable, toggles Home through UI
+  Automation, limits selection to the `PetCrew Relay` server section, and invokes exactly one
+  project whose accessible name matches the validated directory basename. It fails on missing or
+  ambiguous controls and never sends keyboard text or mouse coordinates that could land in a live
+  prompt. The route selects a project only; it does not add an absent project to the OpenCode client,
+  identify a session, or resume one. Live acceptance on 2026-09-26 required Lisa to register
+  `D:\Work\Sayr` once in OpenCode; the same Monitor card then opened the correct project.
 - Live acceptance then proved that Windows had no registered `opencode` URI class, so dispatching
   the supported URI through `explorer.exe` opened Documents. The supported application argument is
   therefore passed directly to the verified standard per-user `OpenCode.exe`; registry repair and

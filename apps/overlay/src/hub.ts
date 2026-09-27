@@ -151,12 +151,74 @@ export async function acknowledgeHubAgent(connection: HubConnection, key: string
   return (await response.json()) as HubSnapshot;
 }
 
+export async function resetHubMonitor(connection: HubConnection) {
+  const response = await fetch(`${connection.endpoint}/v1/monitor/reset`, {
+    method: "POST",
+    headers: authorizedHeaders(connection),
+  });
+  if (!response.ok) throw new Error(`hub_monitor_reset_http_${response.status}`);
+  return (await response.json()) as HubSnapshot;
+}
+
 export function openCodexThread(threadId: string) {
   return invoke<void>("open_codex_thread", { threadId });
 }
 
 export function openOpenCodeProject(directory: string) {
   return invoke<void>("open_opencode_project", { directory });
+}
+
+export interface RelayHealth {
+  healthy: boolean;
+  relay_ready: boolean;
+  opencode_ready: boolean;
+}
+
+export function getRelayHealth() {
+  return invoke<RelayHealth>("get_relay_health");
+}
+
+export function recoverRelay() {
+  return invoke<RelayHealth>("recover_relay");
+}
+
+export interface CodexRestartResult {
+  old_pid: number;
+  new_pid: number;
+  snapshot_path: string;
+  route: "targeted_attempt" | "desktop_restarted";
+  target_pid: number | null;
+}
+
+export interface CodexPressureResult {
+  desktop_pid: number;
+  app_server_pid: number;
+  descendant_count: number;
+  direct_child_count: number;
+  runtime_cohort_count: number;
+  direct_child_names: Array<{ name: string; count: number }>;
+  recent_signals: string[];
+  suspected_thread_ids: string[];
+  tool_app_server_count: number;
+  orphan_tool_app_server_count: number;
+  orphan_tool_app_server_pids: number[];
+}
+
+export function inspectCodexPressure() {
+  return invoke<CodexPressureResult>("inspect_codex_pressure");
+}
+
+export interface OrphanCleanupResult {
+  snapshot_path: string | null;
+  terminated_pids: number[];
+}
+
+export function cleanupOrphanToolAppServers() {
+  return invoke<OrphanCleanupResult>("cleanup_orphan_tool_app_servers");
+}
+
+export function restartCodexDesktop() {
+  return invoke<CodexRestartResult>("restart_codex_desktop");
 }
 
 export async function sendHubEvent(connection: HubConnection, event: AgentEventEnvelope) {

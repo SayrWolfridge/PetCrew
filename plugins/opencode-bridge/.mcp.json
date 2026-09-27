@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "opencode_bridge": {
+      "command": "python",
+      "args": [
+        "scripts/opencode_bridge.py",
+        "mcp"
+      ],
+      "cwd": ".",
+      "env": {
+        "PYTHONUTF8": "1",
+        "OPENCODE_BRIDGE_EXTERNAL_URL": "http://127.0.0.1:4098"
+      },
+      "env_vars": [
+        "OPENCODE_BRIDGE_PASSWORD"
+      ],
+      "required": false,
+      "startup_timeout_sec": 12.0,
+      "tool_timeout_sec": 70.0
+    }
+  }
+}

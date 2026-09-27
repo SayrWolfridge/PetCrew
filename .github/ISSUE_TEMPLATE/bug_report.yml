@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible PetCrew defect without private task content
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve PetCrew. Describe observable behavior only. Remove prompts,
+        transcripts, credentials, full workspace paths, task content, and authorization headers.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the visible behavior and when it began.
+      placeholder: The Monitor shows…
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use the smallest sequence that reproduces the defect.
+      placeholder: |
+        1. Start PetCrew…
+        2. Switch to…
+        3. Observe…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: PetCrew revision/version, Windows version, and relevant Codex or OpenCode version.
+      placeholder: PetCrew 0.1.0; Windows 11; Codex/OpenCode version…
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Optional screenshots or logs after removing private task and machine data.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed prompts, transcripts, secrets, full local paths, and private task content.
+          required: true
+        - label: This report does not describe an unpatched security vulnerability.
+          required: true

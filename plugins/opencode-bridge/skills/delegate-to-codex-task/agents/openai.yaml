@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delegate to Codex Task"
+  short_description: "One-way notices or delegated work with return"
+  default_prompt: "Use $delegate-to-codex-task to notify an existing Codex task or delegate work with the requested return mode."

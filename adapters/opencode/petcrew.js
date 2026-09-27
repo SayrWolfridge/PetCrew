@@ -356,6 +356,7 @@ function makeMapper(
   const changeSummaries = new Map()
   const currentUsers = new Map()
   const assistantReceipts = new Map()
+  const pendingIdleTurns = new Set()
   let turnCounter = 0
 
   function remember(info) {
@@ -464,6 +465,7 @@ function makeMapper(
   }
 
   async function working(rawSessionId, action, timestamp, forceStart = false) {
+    pendingIdleTurns.delete(rawSessionId)
     const previous = phases.get(rawSessionId)
     const eventType = forceStart || previous !== "working" ? "agent.started" : "agent.activity"
     phases.set(rawSessionId, "working")
@@ -481,6 +483,7 @@ function makeMapper(
   ) {
     if (!activeTurns.has(rawSessionId)) return
     if (phase === "completed" && !receipt) return
+    pendingIdleTurns.delete(rawSessionId)
     const payload = basePayload(rawSessionId, phase, summary, timestamp)
     payload.result = result(summary, outcome, timestamp)
     const eventId = phase === "completed"
@@ -505,13 +508,16 @@ function makeMapper(
     const rawSessionId = info.sessionID
     if (info.role === "user") {
       const previous = currentUsers.get(rawSessionId)
-      if (previous?.messageId !== info.id) assistantReceipts.delete(rawSessionId)
+      if (previous?.messageId !== info.id) {
+        assistantReceipts.delete(rawSessionId)
+        pendingIdleTurns.delete(rawSessionId)
+      }
       ensureTurn(rawSessionId, timestamp)
       currentUsers.set(rawSessionId, {
         messageId: info.id,
         createdAt: Number(info.time?.created),
       })
-      return
+      return null
     }
     if (
       info.role !== "assistant"
@@ -528,10 +534,32 @@ function makeMapper(
       && Number(info.time.created) < user.createdAt
     ) return
     if (!user && Number(info.time.created) < Date.parse(turn.startedAt)) return
-    assistantReceipts.set(rawSessionId, {
+    const receipt = {
       messageId: info.id,
       completedAt: isoTime(Number(info.time.completed)),
-    })
+    }
+    assistantReceipts.set(rawSessionId, receipt)
+    return receipt
+  }
+
+  async function completeOrPend(rawSessionId, timestamp) {
+    if (!activeTurns.has(rawSessionId)) return
+    const receipt = assistantReceipts.get(rawSessionId)
+    if (!receipt) {
+      pendingIdleTurns.add(rawSessionId)
+      return
+    }
+    pendingIdleTurns.delete(rawSessionId)
+    await refreshFinalDiff(rawSessionId)
+    await terminal(
+      rawSessionId,
+      "completed",
+      "Закончил работу",
+      "success",
+      "agent.completed",
+      receipt.completedAt,
+      receipt,
+    )
   }
 
   async function recoverAssistantReceipt(rawSessionId, startedAt, client) {
@@ -559,39 +587,21 @@ function makeMapper(
       return
     }
     if (type === "message.updated") {
-      rememberMessage(properties.info, timestamp)
+      const receipt = rememberMessage(properties.info, timestamp)
+      const rawSessionId = properties.info?.sessionID
+      if (receipt && pendingIdleTurns.has(rawSessionId)) {
+        await completeOrPend(rawSessionId, timestamp)
+      }
       return
     }
     if (type === "session.status") {
       if (properties.status?.type === "busy") await working(sessionID, "Работает над задачей", timestamp)
       else if (properties.status?.type === "retry") await working(sessionID, "Повторяет попытку", timestamp)
-      else if (properties.status?.type === "idle") {
-        const receipt = assistantReceipts.get(sessionID)
-        await refreshFinalDiff(sessionID)
-        await terminal(
-          sessionID,
-          "completed",
-          "Закончил работу",
-          "success",
-          "agent.completed",
-          receipt?.completedAt ?? timestamp,
-          receipt,
-        )
-      }
+      else if (properties.status?.type === "idle") await completeOrPend(sessionID, timestamp)
       return
     }
     if (type === "session.idle") {
-      const receipt = assistantReceipts.get(sessionID)
-      await refreshFinalDiff(sessionID)
-      await terminal(
-        sessionID,
-        "completed",
-        "Закончил работу",
-        "success",
-        "agent.completed",
-        receipt?.completedAt ?? timestamp,
-        receipt,
-      )
+      await completeOrPend(sessionID, timestamp)
       return
     }
     if (type === "session.error") {

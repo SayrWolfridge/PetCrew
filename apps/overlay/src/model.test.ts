@@ -3,6 +3,8 @@ import {
   densityForCount,
   displayProgress,
   elapsedWorkingLabel,
+  filterAgentsByTeamStatus,
+  groupAgentsByProject,
   selectLiveAgents,
   selectUnreadSubagents,
   selectUnreadTerminalAgents,
@@ -87,6 +89,37 @@ describe("terminal finish time", () => {
 });
 
 describe("team presentation", () => {
+  it("filters summary groups with the same semantics as their counters", () => {
+    const agents: DemoAgent[] = [
+      { ...baseAgent, agent_id: "planning", phase: "planning" },
+      { ...baseAgent, agent_id: "working", phase: "working" },
+      { ...baseAgent, agent_id: "waiting-input", phase: "waiting_input" },
+      { ...baseAgent, agent_id: "waiting-approval", phase: "waiting_approval" },
+      { ...baseAgent, agent_id: "completed", phase: "completed" },
+      { ...baseAgent, agent_id: "blocked", phase: "blocked" },
+      { ...baseAgent, agent_id: "failed-unread", phase: "failed", unread: true },
+      { ...baseAgent, agent_id: "failed-read", phase: "failed", unread: false },
+      { ...baseAgent, agent_id: "queued", phase: "queued" },
+    ];
+
+    expect(filterAgentsByTeamStatus(agents, "working").map((agent) => agent.agent_id)).toEqual([
+      "planning",
+      "working",
+    ]);
+    expect(filterAgentsByTeamStatus(agents, "waiting").map((agent) => agent.agent_id)).toEqual([
+      "waiting-input",
+      "waiting-approval",
+    ]);
+    expect(filterAgentsByTeamStatus(agents, "done").map((agent) => agent.agent_id)).toEqual([
+      "completed",
+    ]);
+    expect(filterAgentsByTeamStatus(agents, "blocked").map((agent) => agent.agent_id)).toEqual([
+      "blocked",
+      "failed-unread",
+    ]);
+    expect(filterAgentsByTeamStatus(agents, null)).toBe(agents);
+  });
+
   it("uses compact density for a ten-agent team", () => {
     expect(densityForCount(3)).toBe("detailed");
     expect(densityForCount(10)).toBe("compact");
@@ -174,6 +207,28 @@ describe("team presentation", () => {
 
     expect(first.map((agent) => agent.key)).toEqual(["codex:session:a", "codex:session:b"]);
     expect(updated.map((agent) => agent.key)).toEqual(["codex:session:a", "codex:session:b"]);
+  });
+
+  it("groups the list by project and puts projects needing attention first", () => {
+    const agents: DemoAgent[] = [
+      { ...baseAgent, agent_id: "petcrew-work", project: "PetCrew", phase: "working" },
+      { ...baseAgent, agent_id: "sayr-done", project: "Sayr", phase: "completed" },
+      { ...baseAgent, agent_id: "tribune-work", project: "Tribune", phase: "working" },
+      { ...baseAgent, agent_id: "petcrew-wait", project: "PetCrew", phase: "waiting_input" },
+    ];
+
+    const groups = groupAgentsByProject(agents);
+
+    expect(groups.map((group) => group.project)).toEqual(["PetCrew", "Tribune", "Sayr"]);
+    expect(groups[0].agents.map((agent) => agent.agent_id)).toEqual([
+      "petcrew-work",
+      "petcrew-wait",
+    ]);
+  });
+
+  it("keeps agents without a project visible in their own group", () => {
+    const groups = groupAgentsByProject([{ ...baseAgent, project: "   " }]);
+    expect(groups).toEqual([{ project: "Без проекта", agents: [{ ...baseAgent, project: "   " }] }]);
   });
 
   it("inserts a newly started work card first without moving it on streamed updates", () => {

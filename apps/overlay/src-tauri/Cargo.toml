@@ -30,6 +30,7 @@ desktop = ["dep:tauri"]
 axum = "0.8"
 chrono = "0.4"
 futures-util = "0.3"
+notify = "8"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +40,10 @@ tauri = { version = "2", features = [], optional = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tower-http = { version = "0.7", features = ["cors", "limit", "timeout"] }
 url = "2"
+
+[target.'cfg(windows)'.dependencies]
+uiautomation = { version = "0.25.1", default-features = false, features = ["control", "input"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

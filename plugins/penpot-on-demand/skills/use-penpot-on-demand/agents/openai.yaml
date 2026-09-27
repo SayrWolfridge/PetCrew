@@ -1,0 +1,6 @@
+interface:
+  display_name: "Penpot по требованию"
+  short_description: "Запускает Penpot только для текущей работы"
+  default_prompt: "Use $use-penpot-on-demand to start a bounded Penpot design session."
+policy:
+  allow_implicit_invocation: false

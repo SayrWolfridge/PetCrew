@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-EXCLUDED_DIRECTORIES = {".git", "node_modules", "target", "dist", "tmp", "_agents"}
+EXCLUDED_DIRECTORIES = {".git", ".worktrees", "node_modules", "target", "dist", "tmp", "_agents"}
 
 
 def should_skip(path: Path, repo_root: Path) -> bool:

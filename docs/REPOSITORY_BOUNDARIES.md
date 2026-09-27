@@ -3,6 +3,39 @@
 PetCrew is one source repository with several runtime components. It is not a
 backup store for a particular Windows installation.
 
+## Module ownership (accepted 2026-09-05)
+
+Updated_at: 2026-09-05T22:32+03:00.
+
+PetCrew has one source repository and independently installed modules:
+
+- Core owns event ingestion, retained agent state, and the completion journal.
+- Monitor owns presentation and user actions.
+- Provider adapters normalize provider events into the shared protocol.
+- Bridge/Relay owns task submission, exact result routing, and the return-processing queue.
+
+The canonical Bridge/Relay development source is `plugins/opencode-bridge/`,
+alongside `plugins/petcrew/`. Source consolidation is complete; runtime activation
+is separate and remains pending. Bridge began as a personal cross-project plugin,
+which explains the external source still used by the current installation.
+
+Both modules are listed in the repository marketplace as independently available
+plugins. Listing does not install either module. Keep one development source;
+the old installation is a deployment boundary, not a second development tree.
+Any installed source-registration change requires the exact backup and rollback
+plan, including preservation of existing plugin identity and runtime state.
+
+The canonical public integration branch is `main`. Release-hardening or feature work may use an
+isolated `codex/*` branch and managed worktree, but only a verified candidate is merged into
+`main`. A worktree path is an execution detail, not a second source of truth. Use Git worktree
+operations for isolated checkouts and verify their revision and clean state before integration.
+
+Editing repository source must not change the running installation. Monitor,
+Core, and Relay retain separate lifecycle boundaries; closing Monitor must not
+implicitly stop autonomous Relay processing. Runtime bindings, secrets, journals,
+installed caches, binaries, and machine configuration stay outside versioned source.
+No source reorganization authorizes binary publication or a live reinstall.
+
 ## Public source
 
 The following paths form the publishable product:

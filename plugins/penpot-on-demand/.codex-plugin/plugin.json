@@ -1,0 +1,21 @@
+{
+  "name": "penpot-on-demand",
+  "version": "0.1.0+codex.20260914152500",
+  "description": "Explicit-only local Penpot MCP sessions without background Codex probing.",
+  "author": {
+    "name": "Lisa local"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Penpot по требованию",
+    "shortDescription": "Запускает Penpot только для текущей работы",
+    "longDescription": "Skill-only модуль PetCrew запускает существующий локальный Penpot MCP только по явному запросу, обращается к нему напрямую и завершает созданный сеанс после работы. Глобальное MCP-подключение Codex остаётся выключенным.",
+    "developerName": "Lisa local",
+    "category": "Design",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "Открой Penpot по требованию и проверь текущий макет.",
+      "Запусти ограниченную сессию Penpot для этой задачи."
+    ]
+  }
+}

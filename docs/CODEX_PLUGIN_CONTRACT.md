@@ -56,7 +56,8 @@ transcripts, environment variables, approval decisions, file contents, paths, to
 - Limits: 64 KiB per file and at most 500 imported records.
 - Recovery: import at application startup and every two seconds while PetCrew runs.
 - Expiry: 24 hours for non-terminal records and seven days for terminal registry files.
-- Clear: the bundled `Очистить` action removes both hub cache and registry files.
+- Clear: the bundled `Очистить` action clears current Monitor cards and persists an empty
+  presentation snapshot; it does not delete registry files or other recovery evidence.
 - The registry is not a queue, transcript, tool log, or history of intermediate events.
 
 ## Existing-task bootstrap

@@ -1,5 +1,12 @@
 # Security boundaries
 
+## Reporting a vulnerability
+
+Use GitHub's private vulnerability-reporting link for this repository when it is available. If the
+link is not visible, open an issue requesting a private contact channel without including exploit
+details, credentials, private task content, or machine-specific paths. Ordinary defects that do not
+expose a security boundary may use the public bug-report form.
+
 ## Default posture
 
 PetCrew begins as a read-only, local-only observer. Convenience must not weaken Codex or OpenCode approval boundaries.
@@ -83,7 +90,9 @@ already-sanitized protocol event only. PetCrew imports at most 500 records.
 
 Active registry records expire after 24 hours without an event. Terminal registry files expire
 after seven days; once imported, ordinary acknowledged-result retention applies in the hub cache.
-The local `Очистить` action removes the PetCrew-owned registry and hub cache. Hook failure or
+The local `Очистить` action clears the current Monitor cards and persists an empty presentation
+snapshot. It does not delete the latest-state registry, completion journal, Relay state, secret, or
+other recovery evidence; a still-fresh registry record may be imported again. Hook failure or
 registry write failure never blocks Codex work.
 
 Existing-task bootstrap opens the Codex SQLite index read-only and queries only identity,
@@ -110,7 +119,17 @@ navigation targets before writing `hub-cache.json`. Rust accepts only an absolut
 percent-encodes it into the fixed `opencode://open-project?directory=...` deep link, and passes the
 URI as one argument directly to the standard per-user OpenCode Desktop executable after verifying
 that exact file exists. It never invokes a shell, searches PATH, edits URI-handler registry keys,
-or installs an alternate executable. It cannot resume a specific OpenCode session.
+or installs an alternate executable. For the verified OpenCode 1.18.30 and 1.18.32 cold-start
+defect, PetCrew checks for that exact full-path executable before dispatch. When it was not already
+running, PetCrew may replay the same already-validated URI once to the same executable after a
+bounded readiness delay; it must not broaden the target, add user content, or loop. Because
+OpenCode 1.18.32's new layout ignores the delivered event, the Windows desktop build may then use
+UI Automation to select the project. It accepts only one visible `OpenCode` window owned by that
+exact executable, the Home toggle, the `PetCrew Relay` server section, and one accessible project
+name matching the validated directory basename. Missing or ambiguous controls abort the action.
+The fallback invokes accessibility patterns only: no keyboard text, mouse coordinates, prompt
+content, credentials, or session identifiers are supplied. It cannot resume a specific OpenCode
+session.
 
 Do not persist by default:
 

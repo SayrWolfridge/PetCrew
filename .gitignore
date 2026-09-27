@@ -17,6 +17,7 @@ artifacts/backups/
 
 # Local operations, recovery state, and diagnostic scratch files
 tmp/
+.worktrees/
 _Agents/
 PROJECT.md
 docs/CODEX_COMPLETION_BRIDGE_HANDOFF.md
@@ -38,3 +39,7 @@ docs/TZ_LIMITS_AND_REMAINING.md
 Thumbs.db
 .idea/
 .vscode/
+
+# Local release and repair output
+artifacts/releases/
+artifacts/repairs/

@@ -52,6 +52,12 @@ export interface DemoAgent {
     label: string;
     target: string;
   } | null;
+  return_receipt?: {
+    session_id: string;
+    completion_id: string;
+    phase: "completed";
+    workspace: string;
+  } | null;
   last_sequence?: number;
   updated_at?: string;
 }

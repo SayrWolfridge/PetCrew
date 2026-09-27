@@ -27,8 +27,7 @@ use std::{
 };
 use tower_http::{cors::CorsLayer, timeout::TimeoutLayer};
 
-#[cfg(test)]
-use crate::core_ownership::process_is_alive;
+use crate::codex_black_box::BlackBoxHandle;
 use crate::core_ownership::{acquire_core_ownership, CoreOwnership};
 
 #[cfg(feature = "desktop")]
@@ -229,6 +228,15 @@ pub struct NavigationPayload {
     target: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnReceiptPayload {
+    session_id: String,
+    completion_id: String,
+    phase: String,
+    workspace: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventPayload {
@@ -243,6 +251,7 @@ pub struct EventPayload {
     attention: Option<AttentionPayload>,
     result: Option<ResultPayload>,
     navigation: Option<NavigationPayload>,
+    return_receipt: Option<ReturnReceiptPayload>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -346,6 +355,31 @@ impl AgentEvent {
             validate_required_text(&navigation.label, 100, "invalid_navigation")?;
             validate_required_text(&navigation.target, 1000, "invalid_navigation")?;
         }
+        if let Some(receipt) = &self.payload.return_receipt {
+            let valid_route = self.provider == Provider::Codex
+                && self
+                    .payload
+                    .project
+                    .as_ref()
+                    .is_some_and(|project| project.name == "Relay Return")
+                && self.payload.phase == Some(AgentPhase::Completed)
+                && self
+                    .payload
+                    .navigation
+                    .as_ref()
+                    .is_some_and(|navigation| navigation.kind == "task");
+            if !valid_route
+                || !receipt.session_id.starts_with("ses_")
+                || receipt.session_id.len() > 300
+                || !valid_prefixed_digest(&receipt.completion_id, "completion:")
+                || receipt.phase != "completed"
+                || receipt.workspace.is_empty()
+                || receipt.workspace.len() > 1000
+                || !std::path::Path::new(&receipt.workspace).is_absolute()
+            {
+                return Err(ApplyError::Invalid("invalid_return_receipt"));
+            }
+        }
 
         match self.event_type {
             EventType::Progress if self.payload.progress.is_none() => {
@@ -424,6 +458,45 @@ fn snapshot_is_newer(candidate: &AgentSnapshot, current: &AgentSnapshot) -> bool
 
 fn proves_new_opencode_root_turn(event: &AgentEvent, current: &AgentSnapshot) -> bool {
     if event.provider != Provider::Opencode || event.parent_agent_id.is_some() {
+        return false;
+    }
+    let Some(started_at) = event.payload.started_at.as_deref() else {
+        return false;
+    };
+    let Ok(started_at) = DateTime::parse_from_rfc3339(started_at) else {
+        return false;
+    };
+    let Ok(completed_at) = DateTime::parse_from_rfc3339(&current.updated_at) else {
+        return false;
+    };
+    started_at > completed_at
+}
+
+fn proves_new_relay_return(event: &AgentEvent, current: &AgentSnapshot) -> bool {
+    if event.provider != Provider::Codex {
+        return false;
+    }
+    if event.parent_agent_id.is_some() {
+        return false;
+    }
+    if event.event_type != EventType::Discovered {
+        return false;
+    }
+    let agent_id = &event.agent_id;
+    let Some(hex_part) = agent_id.strip_prefix("relay:") else {
+        return false;
+    };
+    if hex_part.len() != 64 || !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let session_hex = event.session_id.strip_prefix("session:").unwrap_or("");
+    if session_hex.len() != 64 || !session_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    if hex_part != session_hex {
+        return false;
+    }
+    if !current.phase.is_terminal() {
         return false;
     }
     let Some(started_at) = event.payload.started_at.as_deref() else {
@@ -568,6 +641,8 @@ pub struct AgentSnapshot {
     unread: bool,
     #[serde(default)]
     navigation: Option<NavigationPayload>,
+    #[serde(default)]
+    return_receipt: Option<ReturnReceiptPayload>,
     last_sequence: u64,
     updated_at: String,
 }
@@ -951,6 +1026,11 @@ impl EventStore {
             .get(&key)
             .map(|current| proves_new_opencode_root_turn(&event, current))
             .unwrap_or(false);
+        let relay_return_new_turn = self
+            .agents
+            .get(&key)
+            .map(|current| proves_new_relay_return(&event, current))
+            .unwrap_or(false);
         let recovered_codex_new_turn = self
             .agents
             .get(&key)
@@ -977,6 +1057,7 @@ impl EventStore {
                 && event.event_type != EventType::Acknowledged
                 && !recovered_event
                 && !opencode_root_new_turn
+                && !relay_return_new_turn
             {
                 return Err(ApplyError::TerminalState);
             }
@@ -1062,6 +1143,7 @@ impl EventStore {
                 result: None,
                 unread: false,
                 navigation: event.payload.navigation.clone(),
+                return_receipt: event.payload.return_receipt.clone(),
                 last_sequence: 0,
                 updated_at: event.occurred_at.clone(),
             });
@@ -1093,6 +1175,9 @@ impl EventStore {
         if let Some(navigation) = &event.payload.navigation {
             agent.navigation = Some(navigation.clone());
         }
+        // The latest Relay status is authoritative: a later waiting/failed state
+        // must not retain a pickup action from an older completion.
+        agent.return_receipt = event.payload.return_receipt.clone();
         if let Some(phase) = event.payload.phase {
             agent.phase = phase;
         }
@@ -1106,6 +1191,10 @@ impl EventStore {
                 .map(AgentProgress::from)
                 .unwrap_or_else(AgentProgress::unavailable);
             agent.change_summary = event.payload.change_summary.clone();
+        }
+        if existing_terminal && relay_return_new_turn {
+            agent.result = None;
+            agent.unread = false;
         }
 
         match event.event_type {
@@ -1327,13 +1416,28 @@ impl EventStore {
         Some(changed)
     }
 
-    #[cfg(feature = "desktop")]
-    fn clear(&mut self) -> HubSnapshot {
+    fn restore_recovered_placeholder_navigation(&mut self, event: &AgentEvent) -> bool {
+        if event.provider != Provider::Codex || !event.agent_id.starts_with("bootstrap-") {
+            return false;
+        }
+        let Some(navigation) = event.payload.navigation.as_ref() else {
+            return false;
+        };
+        let Some(agent) = self.agents.get_mut(&event.key()) else {
+            return false;
+        };
+        if agent.navigation.as_ref() == Some(navigation) {
+            return false;
+        }
+        agent.navigation = Some(navigation.clone());
+        self.revision = self.revision.saturating_add(1);
+        self.persist();
+        true
+    }
+
+    fn reset_monitor(&mut self) -> HubSnapshot {
         self.agents.clear();
-        self.seen_event_ids.clear();
-        self.seen_order.clear();
-        self.completion_cursor = 0;
-        self.completions.clear();
+        self.recovered_missing_since.clear();
         self.revision = self.revision.saturating_add(1);
         self.persist();
         self.snapshot()
@@ -1446,25 +1550,6 @@ fn import_registry(path: &Path, store: &SharedStore, now: DateTime<Utc>) -> Opti
     changed.then(|| store.snapshot())
 }
 
-fn clear_registry(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let file = entry.path();
-        if entry.file_type()?.is_file()
-            && matches!(
-                file.extension().and_then(|value| value.to_str()),
-                Some("json" | "tmp")
-            )
-        {
-            fs::remove_file(file)?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 struct SessionIndexRow {
     id: String,
@@ -1476,6 +1561,7 @@ struct CodexDiscoveryScan {
     events: Vec<AgentEvent>,
     active_keys: HashSet<String>,
     completions: Vec<CodexCompletionCandidate>,
+    excluded_keys: HashSet<String>,
 }
 
 fn opaque_digest(value: &str) -> String {
@@ -1635,23 +1721,31 @@ fn scan_rollout_range(
     end: u64,
     skip_partial_first_line: bool,
     state: &mut RolloutState,
-) -> Option<bool> {
+) -> Option<(bool, u64)> {
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut reader = BufReader::new(file.take(end.saturating_sub(start)));
+    let mut consumed = start;
     if skip_partial_first_line {
         let mut partial = String::new();
         reader.read_line(&mut partial).ok()?;
+        consumed += partial.len() as u64;
     }
     let mut line = String::new();
     let mut saw_lifecycle = false;
+    let mut safe_pos = consumed;
     loop {
         line.clear();
         if reader.read_line(&mut line).ok()? == 0 {
             break;
         }
+        let line_len = line.len() as u64;
+        consumed += line_len;
+        if line.ends_with('\n') {
+            safe_pos = consumed;
+        }
         saw_lifecycle |= apply_rollout_record(&line, state);
     }
-    Some(saw_lifecycle)
+    Some((saw_lifecycle, safe_pos))
 }
 
 fn rollout_state(path: &Path, sessions_root: &Path) -> Option<RolloutState> {
@@ -1670,27 +1764,89 @@ fn rollout_state(path: &Path, sessions_root: &Path) -> Option<RolloutState> {
             return Some(cached.state.clone());
         }
         if cached.length < length {
-            scan_rollout_range(&mut file, cached.length, length, false, &mut cached.state)?;
-            cached.length = length;
+            let (_, safe_pos) =
+                scan_rollout_range(&mut file, cached.length, length, false, &mut cached.state)?;
+            cached.length = safe_pos;
             return Some(cached.state.clone());
         }
     }
 
     let start = length.saturating_sub(MAX_ROLLOUT_TAIL_BYTES);
     let mut state = RolloutState::default();
-    let saw_lifecycle = scan_rollout_range(&mut file, start, length, start > 0, &mut state)?;
+    let (saw_lifecycle, mut safe_pos) =
+        scan_rollout_range(&mut file, start, length, start > 0, &mut state)?;
     if !saw_lifecycle && start > 0 {
         state = RolloutState::default();
-        scan_rollout_range(&mut file, 0, length, false, &mut state)?;
+        if let Some((_, full_safe)) = scan_rollout_range(&mut file, 0, length, false, &mut state) {
+            safe_pos = full_safe;
+        }
     }
     states.insert(
         canonical_path,
         CachedRolloutState {
-            length,
+            length: safe_pos,
             state: state.clone(),
         },
     );
     Some(state)
+}
+
+fn is_guardian_thread(thread_source: Option<&str>, source: Option<&str>) -> bool {
+    match thread_source {
+        Some("subagent") | Some("guardian_review") => {}
+        _ => return false,
+    }
+    let Some(source_json) = source else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(source_json) else {
+        return false;
+    };
+    parsed
+        .get("subagent")
+        .and_then(|s| s.get("other"))
+        .and_then(|o| o.as_str())
+        .is_some_and(|v| v == "guardian")
+}
+
+fn recover_codex_root_key(thread_id: &str) -> String {
+    let digest = opaque_digest(thread_id);
+    format!("codex:session:{digest}:bootstrap-root:{digest}")
+}
+
+fn recover_codex_child_key(parent_id: &str, child_id: &str) -> String {
+    let session_digest = opaque_digest(parent_id);
+    let agent_digest = opaque_digest(child_id);
+    format!("codex:session:{session_digest}:bootstrap-child:{agent_digest}")
+}
+
+fn collect_guardian_excluded_keys(
+    connection: &Connection,
+) -> Result<HashSet<String>, rusqlite::Error> {
+    let mut excluded = HashSet::new();
+    let mut stmt = connection.prepare(
+        "SELECT t.id, e.parent_thread_id, t.thread_source, t.source \
+         FROM threads t \
+         LEFT JOIN thread_spawn_edges e ON e.child_thread_id = t.id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (thread_id, parent_id, thread_source, source) = row?;
+        if is_guardian_thread(thread_source.as_deref(), source.as_deref()) {
+            excluded.insert(recover_codex_root_key(&thread_id));
+            if let Some(ref parent_id) = parent_id {
+                excluded.insert(recover_codex_child_key(parent_id, &thread_id));
+            }
+        }
+    }
+    Ok(excluded)
 }
 
 fn discovered_event(
@@ -1792,14 +1948,13 @@ fn discover_codex_tasks(
         .map(|path| path.join("sessions"))
         .unwrap_or_default();
     let mut scan = CodexDiscoveryScan::default();
+    scan.excluded_keys = collect_guardian_excluded_keys(&connection)?;
 
     let mut roots = connection.prepare(
         "SELECT t.id, t.cwd, t.rollout_path, \
                 COALESCE(t.updated_at_ms, t.updated_at * 1000) \
          FROM threads t \
          WHERE t.archived = 0 \
-           AND NOT (COALESCE(t.thread_source, '') = 'subagent' \
-                    AND COALESCE(t.source, '') LIKE '{\"subagent\":%') \
            AND COALESCE(t.updated_at_ms, t.updated_at * 1000) >= ?1 \
            AND NOT EXISTS (SELECT 1 FROM thread_spawn_edges e WHERE e.child_thread_id = t.id)",
     )?;
@@ -1813,6 +1968,12 @@ fn discover_codex_tasks(
     })?;
     for row in root_rows {
         let (thread_id, cwd, rollout_path, updated_at_ms) = row?;
+        if scan
+            .excluded_keys
+            .contains(&recover_codex_root_key(&thread_id))
+        {
+            continue;
+        }
         let title = names
             .get(&thread_id)
             .map(String::as_str)
@@ -1906,6 +2067,12 @@ fn discover_codex_tasks(
     })?;
     for row in child_rows {
         let (parent_id, child_id, cwd, nickname, rollout_path, updated_at_ms) = row?;
+        if scan
+            .excluded_keys
+            .contains(&recover_codex_child_key(&parent_id, &child_id))
+        {
+            continue;
+        }
         let title = safe_discovery_label(nickname.as_deref(), "Помощник Codex", 120);
         let state = rollout_state(Path::new(&rollout_path), &sessions_root);
         let working = state
@@ -1971,15 +2138,18 @@ fn import_codex_tasks(
 ) -> Option<HubSnapshot> {
     let scan = discover_codex_tasks(database_path, session_index_path, now).ok()?;
     let mut store = store.0.lock().ok()?;
-    let mut changed = store.retain_recovered(&scan.active_keys, now);
+    let mut changed = store.remove_keys(&scan.excluded_keys);
+    changed |= store.retain_recovered(&scan.active_keys, now);
     for event in scan.events {
         if let Some(merged) = store.merge_recovered_navigation(&event) {
             changed |= merged;
             continue;
         }
-        match store.apply(event) {
+        match store.apply(event.clone()) {
             Ok(_) => changed = true,
-            Err(ApplyError::Replay | ApplyError::StaleSequence | ApplyError::TerminalState) => {}
+            Err(ApplyError::Replay | ApplyError::StaleSequence | ApplyError::TerminalState) => {
+                changed |= store.restore_recovered_placeholder_navigation(&event);
+            }
             Err(_) => {}
         }
     }
@@ -2050,6 +2220,7 @@ pub struct HubRuntime {
     registry_path: Option<PathBuf>,
     codex_sources: Option<(PathBuf, PathBuf)>,
     emitter: Option<SnapshotEmitter>,
+    _codex_black_box: Option<BlackBoxHandle>,
     _ownership: Option<CoreOwnership>,
 }
 
@@ -2068,6 +2239,7 @@ struct PreparedCore {
     registry_path: PathBuf,
     codex_sources: Option<(PathBuf, PathBuf)>,
     emitter: SnapshotEmitter,
+    codex_black_box: Option<BlackBoxHandle>,
     listener: StdTcpListener,
     router: Router,
     ownership: CoreOwnership,
@@ -2260,6 +2432,26 @@ async fn acknowledge_agent(
     Ok(Json(snapshot))
 }
 
+async fn reset_monitor(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<HubSnapshot>, ApiError> {
+    if !authorized(&headers, &state.token) {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+    let snapshot = state
+        .store
+        .0
+        .lock()
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "store_unavailable"))?
+        .reset_monitor();
+    let _ = state.completion_notifier.send(snapshot.revision);
+    if let Some(emitter) = &state.emitter {
+        emitter(snapshot.clone());
+    }
+    Ok(Json(snapshot))
+}
+
 struct SnapshotStreamState {
     store: SharedStore,
     receiver: tokio::sync::watch::Receiver<u64>,
@@ -2378,6 +2570,7 @@ fn build_router(state: HttpState) -> Router {
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/snapshots/stream", get(stream_snapshots))
         .route("/v1/acknowledgements", post(acknowledge_agent))
+        .route("/v1/monitor/reset", post(reset_monitor))
         .route("/v1/completions", get(get_completions))
         .route("/v1/completions/stream", get(stream_completions))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -2554,6 +2747,13 @@ fn prepare_core(
         completion_notifier,
     });
     let codex_sources = codex_state_sources();
+    let codex_black_box = codex_sources
+        .as_ref()
+        .and_then(|(database, session_index)| {
+            let codex_home = database.parent()?;
+            let sessions_root = session_index.parent().map(|root| root.join("sessions"));
+            BlackBoxHandle::spawn(codex_home, Some(database.clone()), sessions_root, app_data)
+        });
     import_core_sources(&registry_path, &codex_sources, &store, &emitter);
 
     Ok(PreparedCore {
@@ -2563,6 +2763,7 @@ fn prepare_core(
         registry_path,
         codex_sources,
         emitter,
+        codex_black_box,
         listener,
         router,
         ownership,
@@ -2573,15 +2774,17 @@ pub async fn run_headless(app_data: PathBuf) -> Result<(), Box<dyn std::error::E
     if existing_core_connection(&app_data).is_some() {
         return Err("petcrew_core_already_running".into());
     }
-    let prepared = prepare_core(&app_data, None)?;
+    let mut prepared = prepare_core(&app_data, None)?;
     let poll = tokio::spawn(poll_core_sources(
         prepared.registry_path.clone(),
         prepared.codex_sources.clone(),
         prepared.store.clone(),
         prepared.emitter.clone(),
     ));
+    let codex_black_box = prepared.codex_black_box.take();
     let listener = tokio::net::TcpListener::from_std(prepared.listener)?;
     let result = axum::serve(listener, prepared.router).await;
+    drop(codex_black_box);
     poll.abort();
     let _ = fs::remove_file(&prepared.runtime_path);
     drop(prepared.ownership);
@@ -2599,6 +2802,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             registry_path: None,
             codex_sources: None,
             emitter: None,
+            _codex_black_box: None,
             _ownership: None,
         });
         return Ok(());
@@ -2608,7 +2812,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let desktop_emitter = Arc::new(move |snapshot: HubSnapshot| {
         let _ = emit_handle.emit(SNAPSHOT_EVENT, snapshot);
     });
-    let prepared = prepare_core(&app_data, Some(desktop_emitter))?;
+    let mut prepared = prepare_core(&app_data, Some(desktop_emitter))?;
     let listener = prepared.listener;
     let router = prepared.router;
 
@@ -2637,6 +2841,7 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         registry_path: Some(prepared.registry_path),
         codex_sources: prepared.codex_sources,
         emitter: Some(prepared.emitter),
+        _codex_black_box: prepared.codex_black_box.take(),
         _ownership: Some(prepared.ownership),
     });
     Ok(())
@@ -2736,18 +2941,308 @@ fn opencode_desktop_executable(local_app_data: &Path) -> Result<PathBuf, &'stati
 }
 
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn open_opencode_project(directory: String) -> Result<(), String> {
-    let uri = opencode_project_uri(&directory).map_err(str::to_string)?;
-    let local_app_data =
-        std::env::var_os("LOCALAPPDATA").ok_or_else(|| "local_app_data_missing".to_string())?;
-    let executable =
-        opencode_desktop_executable(Path::new(&local_app_data)).map_err(str::to_string)?;
+const OPENCODE_COLD_START_READY_DELAY: Duration = Duration::from_secs(7);
+
+#[cfg(all(feature = "desktop", windows))]
+fn exact_process_running(executable: &Path) -> Result<bool, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let expected = executable.to_string_lossy();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("opencode_navigation_probe_failed".to_string());
+        }
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut has_entry = Process32FirstW(snapshot, &mut entry) != 0;
+        while has_entry {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+            if !process.is_null() {
+                let mut buffer = vec![0u16; 32_768];
+                let mut size = buffer.len() as u32;
+                if QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) != 0 {
+                    let process_path = OsString::from_wide(&buffer[..size as usize]);
+                    if process_path
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&expected)
+                    {
+                        CloseHandle(process);
+                        CloseHandle(snapshot);
+                        return Ok(true);
+                    }
+                }
+                CloseHandle(process);
+            }
+            has_entry = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+    }
+    Ok(false)
+}
+
+fn opencode_project_label(directory: &Path) -> Result<String, &'static str> {
+    directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or("invalid_opencode_project_label")
+}
+
+fn accessible_project_name_matches(accessible_name: &str, project_label: &str) -> bool {
+    let accessible_name = accessible_name.trim();
+    let project_label = project_label.trim();
+    accessible_name.eq_ignore_ascii_case(project_label)
+        || accessible_name
+            .strip_suffix(project_label)
+            .is_some_and(|prefix| prefix.chars().last().is_some_and(char::is_whitespace))
+}
+
+#[cfg(all(feature = "desktop", windows))]
+fn process_image_matches(process_id: u32, executable: &Path) -> bool {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if process.is_null() {
+            return false;
+        }
+        let mut buffer = vec![0u16; 32_768];
+        let mut size = buffer.len() as u32;
+        let matched = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size) != 0
+            && OsString::from_wide(&buffer[..size as usize])
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&executable.to_string_lossy());
+        CloseHandle(process);
+        matched
+    }
+}
+
+#[cfg(all(feature = "desktop", windows))]
+fn select_opencode_project_in_new_layout(
+    executable: &Path,
+    directory: &Path,
+) -> Result<(), String> {
+    use std::thread;
+    use uiautomation::{
+        patterns::{UIInvokePattern, UITogglePattern},
+        types::{ControlType, ToggleState, UIProperty},
+        variants::Value,
+        UIAutomation, UIElement,
+    };
+
+    const HOME_LABELS: [&str; 2] = ["Главная", "Home"];
+    const SERVER_SECTION_MARKERS: [&str; 2] = ["проекты сервера", "server projects"];
+    const RELAY_SERVER_NAME: &str = "PetCrew Relay";
+
+    fn aria_properties(element: &UIElement) -> String {
+        match element
+            .get_property_value(UIProperty::AriaProperties)
+            .and_then(|value| value.get_value())
+        {
+            Ok(Value::STRING(value)) => value,
+            _ => String::new(),
+        }
+    }
+
+    let project_label = opencode_project_label(directory).map_err(str::to_string)?;
+    let automation = UIAutomation::new().map_err(|_| "opencode_accessibility_unavailable")?;
+    let windows = automation
+        .create_matcher()
+        .name("OpenCode")
+        .classname("Chrome_WidgetWin_1")
+        .depth(4)
+        .timeout(0)
+        .find_all()
+        .map_err(|_| "opencode_window_not_found")?;
+    let mut windows = windows.into_iter().filter(|window| {
+        window
+            .get_process_id()
+            .is_ok_and(|process_id| process_image_matches(process_id, executable))
+            && window.is_offscreen().is_ok_and(|offscreen| !offscreen)
+    });
+    let window = windows.next().ok_or("opencode_window_not_found")?;
+    if windows.next().is_some() {
+        return Err("opencode_window_ambiguous".to_string());
+    }
+
+    let home = HOME_LABELS
+        .iter()
+        .find_map(|label| {
+            automation
+                .create_matcher()
+                .from(window.clone())
+                .control_type(ControlType::Button)
+                .name(*label)
+                .depth(12)
+                .timeout(0)
+                .find_first()
+                .ok()
+        })
+        .ok_or("opencode_home_control_not_found")?;
+    let home_toggle = home
+        .get_pattern::<UITogglePattern>()
+        .map_err(|_| "opencode_home_control_unavailable")?;
+    if home_toggle
+        .get_toggle_state()
+        .map_err(|_| "opencode_home_state_unavailable")?
+        != ToggleState::On
+    {
+        home_toggle
+            .toggle()
+            .map_err(|_| "opencode_home_navigation_failed")?;
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mut relay_section_seen = false;
+    loop {
+        let buttons = automation
+            .create_matcher()
+            .from(window.clone())
+            .control_type(ControlType::Button)
+            .depth(24)
+            .timeout(0)
+            .find_all()
+            .map_err(|_| "opencode_project_list_unavailable")?;
+        let mut server_sections = buttons
+            .iter()
+            .filter_map(|button| {
+                let name = button.get_name().ok()?;
+                let normalized = name.to_lowercase();
+                SERVER_SECTION_MARKERS
+                    .iter()
+                    .any(|marker| normalized.contains(marker))
+                    .then(|| {
+                        button
+                            .get_bounding_rectangle()
+                            .ok()
+                            .map(|bounds| (bounds.get_top(), name))
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        server_sections.sort_by_key(|(top, _)| *top);
+
+        if let Some(relay_section) = server_sections
+            .iter()
+            .position(|(_, name)| name.contains(RELAY_SERVER_NAME))
+        {
+            relay_section_seen = true;
+            let section_top = server_sections[relay_section].0;
+            let section_bottom = server_sections
+                .get(relay_section + 1)
+                .map_or(i32::MAX, |(top, _)| *top);
+
+            let mut candidates = buttons.into_iter().filter(|button| {
+                let Ok(bounds) = button.get_bounding_rectangle() else {
+                    return false;
+                };
+                if bounds.get_top() <= section_top || bounds.get_top() >= section_bottom {
+                    return false;
+                }
+                button
+                    .get_name()
+                    .is_ok_and(|name| accessible_project_name_matches(&name, &project_label))
+            });
+            if let Some(project) = candidates.next() {
+                if candidates.next().is_some() {
+                    return Err("opencode_project_ambiguous".to_string());
+                }
+                if aria_properties(&project).contains("current=page") {
+                    return Ok(());
+                }
+                project
+                    .get_pattern::<UIInvokePattern>()
+                    .and_then(|pattern| pattern.invoke())
+                    .map_err(|_| "opencode_project_selection_failed")?;
+                thread::sleep(Duration::from_millis(350));
+                return Ok(());
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(if relay_section_seen {
+                "opencode_project_not_registered".to_string()
+            } else {
+                "opencode_relay_section_not_found".to_string()
+            });
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(feature = "desktop")]
+async fn launch_opencode_uri(
+    executable: &Path,
+    uri: &str,
+    was_running: bool,
+    cold_start_ready_delay: Duration,
+) -> Result<(), String> {
+    std::process::Command::new(executable)
+        .arg(uri)
+        .spawn()
+        .map_err(|_| "opencode_navigation_failed".to_string())?;
+
+    if was_running {
+        return Ok(());
+    }
+
+    tokio::time::sleep(cold_start_ready_delay).await;
     std::process::Command::new(executable)
         .arg(uri)
         .spawn()
         .map(|_| ())
         .map_err(|_| "opencode_navigation_failed".to_string())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn open_opencode_project(directory: String) -> Result<(), String> {
+    let uri = opencode_project_uri(&directory).map_err(str::to_string)?;
+    let local_app_data =
+        std::env::var_os("LOCALAPPDATA").ok_or_else(|| "local_app_data_missing".to_string())?;
+    let executable =
+        opencode_desktop_executable(Path::new(&local_app_data)).map_err(str::to_string)?;
+    let was_running = exact_process_running(&executable)?;
+    launch_opencode_uri(
+        &executable,
+        &uri,
+        was_running,
+        OPENCODE_COLD_START_READY_DELAY,
+    )
+    .await?;
+
+    #[cfg(windows)]
+    {
+        let fallback_executable = executable.clone();
+        let fallback_directory = PathBuf::from(directory);
+        tokio::task::spawn_blocking(move || {
+            select_opencode_project_in_new_layout(&fallback_executable, &fallback_directory)
+        })
+        .await
+        .map_err(|_| "opencode_accessibility_task_failed".to_string())??;
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -2776,11 +3271,6 @@ pub fn acknowledge_hub_agent(
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn clear_hub(app: AppHandle, state: TauriState<'_, HubRuntime>) -> Result<HubSnapshot, String> {
-    let registry_path = state
-        .registry_path
-        .as_ref()
-        .ok_or_else(|| "hub_clear_available_only_on_core".to_string())?;
-    clear_registry(registry_path).map_err(|_| "hub_registry_clear_failed".to_string())?;
     let snapshot = {
         let mut store = state
             .store
@@ -2789,7 +3279,7 @@ pub fn clear_hub(app: AppHandle, state: TauriState<'_, HubRuntime>) -> Result<Hu
             .0
             .lock()
             .map_err(|_| "hub_store_unavailable".to_string())?;
-        store.clear()
+        store.reset_monitor()
     };
     let _ = app.emit(SNAPSHOT_EVENT, snapshot.clone());
     Ok(snapshot)
@@ -2826,33 +3316,6 @@ mod tests {
         drop(first);
         let second = acquire_core_ownership(&app_data).unwrap();
         drop(second);
-        fs::remove_dir_all(app_data).unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn core_ownership_recovers_lock_for_exited_process_with_retained_handle() {
-        let app_data = temp_registry("core-stale-exited-owner");
-        let mut child = std::process::Command::new("cmd")
-            .args(["/C", "exit", "0"])
-            .spawn()
-            .unwrap();
-        let dead_pid = child.id();
-        assert!(child.wait().unwrap().success());
-
-        // Keep `child` in scope: its Windows process handle retains the exited
-        // process object, reproducing the case where OpenProcess succeeds even
-        // though the owner is no longer running.
-        fs::write(app_data.join("hub-core.lock"), dead_pid.to_string()).unwrap();
-        assert!(!process_is_alive(dead_pid));
-
-        let ownership = acquire_core_ownership(&app_data).unwrap();
-        assert_eq!(
-            fs::read_to_string(app_data.join("hub-core.lock")).unwrap(),
-            std::process::id().to_string()
-        );
-        drop(ownership);
-        drop(child);
         fs::remove_dir_all(app_data).unwrap();
     }
 
@@ -2939,6 +3402,15 @@ mod tests {
 
     fn test_notifier() -> tokio::sync::watch::Sender<u64> {
         tokio::sync::watch::channel(0_u64).0
+    }
+
+    fn test_http_state() -> HttpState {
+        HttpState {
+            token: Arc::new("test-token".to_string()),
+            store: SharedStore(Arc::new(Mutex::new(EventStore::load(None)))),
+            emitter: None,
+            completion_notifier: test_notifier(),
+        }
     }
 
     #[test]
@@ -3061,6 +3533,286 @@ mod tests {
             snapshot.agents[0].started_at.as_deref(),
             Some("2026-07-19T16:05:00+03:00")
         );
+    }
+
+    #[test]
+    fn relay_card_reactivates_terminal_card_with_newer_started_at() {
+        let mut store = EventStore::load(None);
+        let digest = "c".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        store.apply(completed).unwrap();
+
+        let snapshot_after_complete = store.snapshot();
+        assert_eq!(snapshot_after_complete.agents.len(), 1);
+        assert!(snapshot_after_complete.agents[0].phase.is_terminal());
+
+        let mut reactivated = sample_event("relay-return-reactivation", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let snapshot = store.apply(reactivated).unwrap();
+
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.agents[0].phase, AgentPhase::Working);
+        assert!(!snapshot.agents[0].unread);
+        assert_eq!(
+            snapshot.agents[0].started_at.as_deref(),
+            Some("2026-07-19T16:10:00+03:00")
+        );
+    }
+
+    #[test]
+    fn relay_card_rejects_reactivation_without_newer_started_at() {
+        let mut store = EventStore::load(None);
+        let digest = "d".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        completed.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        store.apply(completed).unwrap();
+
+        let mut same_time = sample_event("relay-return-same-time", 2);
+        same_time.provider = Provider::Codex;
+        same_time.session_id = session_id;
+        same_time.agent_id = relay_agent_id;
+        same_time.event_type = EventType::Discovered;
+        same_time.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        same_time.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        same_time.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(same_time);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn relay_card_rejects_reactivation_for_non_relay_agent() {
+        let mut store = EventStore::load(None);
+        let digest = "e".repeat(64);
+        let session_id = format!("session:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = format!("root:{digest}");
+        store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("non-relay-reactivation", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = format!("root:{digest}");
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(reactivated);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn relay_card_rejects_wrong_provider() {
+        let mut store = EventStore::load(None);
+        let digest = "a".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        let snapshot = store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("relay-wrong-provider", 2);
+        reactivated.provider = Provider::Opencode;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        assert!(!proves_new_relay_return(&reactivated, &snapshot.agents[0]));
+    }
+
+    #[test]
+    fn relay_card_rejects_short_relay_id() {
+        let mut store = EventStore::load(None);
+        let digest = "b".repeat(64);
+        let session_id = format!("session:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = format!("relay:{}", "b".repeat(32));
+        store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("relay-short-id", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = format!("relay:{}", "b".repeat(32));
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(reactivated);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn relay_card_rejects_parented_agent() {
+        let mut store = EventStore::load(None);
+        let digest = "f".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("relay-parented", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.parent_agent_id = Some("turn:some-parent".to_string());
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(reactivated);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn relay_card_keeps_original_terminal_card_for_mismatched_session() {
+        let mut store = EventStore::load(None);
+        let digest = "a".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        let original_key = completed.key();
+        store.apply(completed).unwrap();
+
+        let wrong_session = format!("session:{}", "b".repeat(64));
+        let mut reactivated = sample_event("relay-wrong-session", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = wrong_session;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let snapshot = store.apply(reactivated).unwrap();
+
+        assert_eq!(snapshot.agents.len(), 2);
+        let original = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.key == original_key)
+            .unwrap();
+        assert!(original.phase.is_terminal());
+        assert!(original.unread);
+        assert!(original.result.is_some());
+    }
+
+    #[test]
+    fn relay_queued_reactivation_clears_old_result_unread() {
+        let mut store = EventStore::load(None);
+        let digest = "a".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        let snapshot = store.apply(completed).unwrap();
+        assert!(snapshot.agents[0].unread);
+        assert!(snapshot.agents[0].result.is_some());
+
+        let mut reactivated = sample_event("relay-queued-reactivation", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Queued);
+        let snapshot = store.apply(reactivated).unwrap();
+
+        assert!(!snapshot.agents[0].unread);
+        assert!(snapshot.agents[0].result.is_none());
+    }
+
+    #[test]
+    fn relay_card_rejects_mismatched_digests() {
+        let mut store = EventStore::load(None);
+        let agent_digest = "a".repeat(64);
+        let session_digest = "b".repeat(64);
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = format!("session:{session_digest}");
+        completed.agent_id = format!("relay:{agent_digest}");
+        store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("relay-mismatched-digests", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = format!("session:{session_digest}");
+        reactivated.agent_id = format!("relay:{agent_digest}");
+        reactivated.event_type = EventType::Discovered;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(reactivated);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn relay_card_rejects_wrong_event_type() {
+        let mut store = EventStore::load(None);
+        let digest = "a".repeat(64);
+        let session_id = format!("session:{digest}");
+        let relay_agent_id = format!("relay:{digest}");
+
+        let mut completed = completed_event(1, true);
+        completed.provider = Provider::Codex;
+        completed.session_id = session_id.clone();
+        completed.agent_id = relay_agent_id.clone();
+        store.apply(completed).unwrap();
+
+        let mut reactivated = sample_event("relay-wrong-event-type", 2);
+        reactivated.provider = Provider::Codex;
+        reactivated.session_id = session_id;
+        reactivated.agent_id = relay_agent_id;
+        reactivated.event_type = EventType::Started;
+        reactivated.occurred_at = "2026-07-19T16:10:00+03:00".to_string();
+        reactivated.payload.started_at = Some("2026-07-19T16:10:00+03:00".to_string());
+        reactivated.payload.phase = Some(AgentPhase::Working);
+        let result = store.apply(reactivated);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3189,6 +3941,97 @@ mod tests {
         let reloaded = EventStore::load(Some(cache_path));
         assert_eq!(reloaded.completion_inbox(0).completions.len(), 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn monitor_reset_clears_cards_but_preserves_relay_completion_and_replay_state() {
+        let directory = temp_registry("monitor-reset");
+        let cache_path = directory.join("hub-cache.json");
+        let digest = "8".repeat(64);
+        let mut store = EventStore::load(Some(cache_path.clone()));
+        let event = recent_opencode_completion("monitor-reset-completion", &digest);
+        store.apply(event).unwrap();
+        let cursor_before = store.completion_cursor;
+
+        let snapshot = store.reset_monitor();
+
+        assert!(snapshot.agents.is_empty());
+        assert_eq!(store.completion_cursor, cursor_before);
+        assert_eq!(store.completion_inbox(0).completions.len(), 1);
+        assert!(store.seen_event_ids.contains("monitor-reset-completion"));
+
+        drop(store);
+        let reloaded = EventStore::load(Some(cache_path));
+        assert!(reloaded.snapshot().agents.is_empty());
+        assert_eq!(reloaded.completion_inbox(0).completions.len(), 1);
+        assert!(reloaded.seen_event_ids.contains("monitor-reset-completion"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exact_relay_pickup_receipt_survives_snapshot_and_reset_does_not_deliver_it() {
+        let directory = temp_registry("relay-pickup-receipt");
+        let cache_path = directory.join("hub-cache.json");
+        let mut store = EventStore::load(Some(cache_path.clone()));
+        let mut event = sample_event("relay-pickup", 1);
+        event.provider = Provider::Codex;
+        event.session_id = format!("session:{}", "a".repeat(64));
+        event.agent_id = format!("relay:{}", "a".repeat(64));
+        event.event_type = EventType::Discovered;
+        event.payload.project.as_mut().unwrap().name = "Relay Return".to_string();
+        event.payload.phase = Some(AgentPhase::Completed);
+        event.payload.navigation = Some(NavigationPayload {
+            kind: "task".to_string(),
+            label: "Открыть в Codex".to_string(),
+            target: "019f9a58-1f22-7f63-bd1c-7c480dd3ea1d".to_string(),
+        });
+        event.payload.return_receipt = Some(ReturnReceiptPayload {
+            session_id: "ses_exact_test".to_string(),
+            completion_id: format!("completion:{}", "b".repeat(64)),
+            phase: "completed".to_string(),
+            workspace: directory.to_string_lossy().to_string(),
+        });
+
+        let snapshot = store.apply(event.clone()).unwrap();
+        assert_eq!(
+            snapshot.agents[0].return_receipt,
+            event.payload.return_receipt
+        );
+        drop(store);
+        let mut reloaded = EventStore::load(Some(cache_path));
+        assert_eq!(
+            reloaded.snapshot().agents[0].return_receipt,
+            event.payload.return_receipt
+        );
+        assert!(reloaded.reset_monitor().agents.is_empty());
+        assert!(reloaded.seen_event_ids.contains("relay-pickup"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn return_receipt_is_rejected_on_unrelated_or_waiting_cards() {
+        let mut event = sample_event("invalid-relay-pickup", 1);
+        event.payload.return_receipt = Some(ReturnReceiptPayload {
+            session_id: "ses_exact_test".to_string(),
+            completion_id: format!("completion:{}", "b".repeat(64)),
+            phase: "completed".to_string(),
+            workspace: std::env::temp_dir().to_string_lossy().to_string(),
+        });
+        assert!(matches!(
+            event.validate(),
+            Err(ApplyError::Invalid("invalid_return_receipt"))
+        ));
+        event.provider = Provider::Codex;
+        event.payload.project.as_mut().unwrap().name = "Relay Return".to_string();
+        event.payload.navigation = Some(NavigationPayload {
+            kind: "task".to_string(),
+            label: "Открыть в Codex".to_string(),
+            target: "019f9a58-1f22-7f63-bd1c-7c480dd3ea1d".to_string(),
+        });
+        assert!(matches!(
+            event.validate(),
+            Err(ApplyError::Invalid("invalid_return_receipt"))
+        ));
     }
 
     #[test]
@@ -3436,21 +4279,6 @@ mod tests {
 
         assert!(snapshot.agents.is_empty());
         assert!(!registry_file.exists());
-        fs::remove_dir_all(registry).unwrap();
-    }
-
-    #[test]
-    fn clearing_registry_removes_owned_events_only() {
-        let registry = temp_registry("clear");
-        fs::write(registry.join("agent.json"), b"{}").unwrap();
-        fs::write(registry.join("agent.tmp"), b"{}").unwrap();
-        fs::write(registry.join("keep.txt"), b"keep").unwrap();
-
-        clear_registry(&registry).unwrap();
-
-        assert!(!registry.join("agent.json").exists());
-        assert!(!registry.join("agent.tmp").exists());
-        assert!(registry.join("keep.txt").exists());
         fs::remove_dir_all(registry).unwrap();
     }
 
@@ -4290,6 +5118,109 @@ mod tests {
         fs::remove_dir_all(local_app_data).unwrap();
     }
 
+    #[cfg(windows)]
+    fn fake_opencode_launcher(directory: &Path) -> PathBuf {
+        let executable = directory.join("fake-opencode.cmd");
+        fs::write(
+            &executable,
+            "@echo off\r\necho %*>>\"%~dp0launches.log\"\r\nif exist \"%~dp0warm.marker\" exit /b 0\r\ntype nul > \"%~dp0warm.marker\"\r\nping 127.0.0.1 -n 3 > nul\r\n",
+        )
+        .unwrap();
+        executable
+    }
+
+    #[cfg(windows)]
+    fn fake_opencode_launch_count(directory: &Path) -> usize {
+        fs::read_to_string(directory.join("launches.log"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn warm_opencode_navigation_dispatches_once() {
+        let directory = temp_registry("opencode-warm-navigation");
+        let executable = fake_opencode_launcher(&directory);
+
+        launch_opencode_uri(
+            &executable,
+            "opencode://open-project?directory=C%3A%5CProjects%5CPetCrew",
+            true,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake_opencode_launch_count(&directory) == 0 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("warm OpenCode launch was not observable within two seconds");
+        assert_eq!(fake_opencode_launch_count(&directory), 1);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cold_opencode_navigation_replays_once_after_startup() {
+        let directory = temp_registry("opencode-cold-navigation");
+        let executable = fake_opencode_launcher(&directory);
+
+        launch_opencode_uri(
+            &executable,
+            "opencode://open-project?directory=C%3A%5CProjects%5CPetCrew",
+            false,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        // Both processes have been spawned, but cmd.exe can publish its log line late on a busy
+        // Windows host. Wait for the observable contract instead of relying on a fixed delay.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fake_opencode_launch_count(&directory) < 2 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("cold OpenCode replay was not observable within five seconds");
+        assert_eq!(fake_opencode_launch_count(&directory), 2);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_only_an_exact_running_executable_path() {
+        assert!(exact_process_running(&std::env::current_exe().unwrap()).unwrap());
+        let directory = temp_registry("opencode-process-probe");
+        let missing = directory.join("OpenCode.exe");
+        assert!(!exact_process_running(&missing).unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn derives_opencode_project_label_from_directory_name() {
+        assert_eq!(
+            opencode_project_label(Path::new(r"C:\Projects\PetCrew")),
+            Ok("PetCrew".to_string())
+        );
+    }
+
+    #[test]
+    fn matches_exact_or_avatar_prefixed_opencode_project_name() {
+        assert!(accessible_project_name_matches("PetCrew", "PetCrew"));
+        assert!(accessible_project_name_matches(
+            "К Конкуренты",
+            "Конкуренты"
+        ));
+        assert!(!accessible_project_name_matches("OtherPetCrew", "PetCrew"));
+        assert!(!accessible_project_name_matches("PetCrew copy", "PetCrew"));
+    }
+
     #[test]
     fn cache_does_not_persist_navigation_target() {
         let directory = temp_registry("navigation-cache");
@@ -4312,6 +5243,78 @@ mod tests {
         assert!(snapshot.agents[0].navigation.is_some());
         let cached: CacheFile = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
         assert!(cached.agents[0].navigation.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovered_bootstrap_cards_restore_navigation_after_cache_reload() {
+        let directory = temp_registry("bootstrap-navigation-cache");
+        let database = directory.join("state_5.sqlite");
+        let index = directory.join("session_index.jsonl");
+        let cache_path = directory.join("hub-cache.json");
+        let connection = discovery_database(&database);
+        let now = Utc::now();
+        for id in ["parent-thread", "child-thread"] {
+            connection
+                .execute(
+                    "INSERT INTO threads (id, cwd, updated_at, updated_at_ms, archived) \
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    rusqlite::params![
+                        id,
+                        r"C:\Projects\PetCrew",
+                        now.timestamp(),
+                        now.timestamp_millis()
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO thread_spawn_edges \
+                 (parent_thread_id, child_thread_id, status) VALUES (?1, ?2, 'open')",
+                rusqlite::params!["parent-thread", "child-thread"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let first_store = SharedStore(Arc::new(Mutex::new(EventStore::load(Some(
+            cache_path.clone(),
+        )))));
+        let first = import_codex_tasks(&database, &index, &first_store, now).unwrap();
+        assert_eq!(first.agents.len(), 2);
+        assert!(first.agents.iter().all(|agent| agent.navigation.is_some()));
+        let replay_count = first_store.0.lock().unwrap().seen_event_ids.len();
+        drop(first_store);
+
+        let reloaded = SharedStore(Arc::new(Mutex::new(EventStore::load(Some(
+            cache_path.clone(),
+        )))));
+        assert!(reloaded
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .agents
+            .iter()
+            .all(|agent| agent.navigation.is_none()));
+        let restored = import_codex_tasks(&database, &index, &reloaded, now).unwrap();
+        assert_eq!(restored.agents.len(), 2);
+        assert!(restored
+            .agents
+            .iter()
+            .all(|agent| agent.navigation.is_some()));
+        assert_eq!(
+            reloaded.0.lock().unwrap().seen_event_ids.len(),
+            replay_count
+        );
+        drop(reloaded);
+
+        let persisted = EventStore::load(Some(cache_path));
+        assert!(persisted
+            .snapshot()
+            .agents
+            .iter()
+            .all(|agent| agent.navigation.is_none()));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -4658,6 +5661,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_reset_endpoint_requires_bearer_and_preserves_completion_inbox() {
+        let shared = SharedStore(Arc::new(Mutex::new(EventStore::load(None))));
+        shared
+            .0
+            .lock()
+            .unwrap()
+            .apply(recent_opencode_completion(
+                "monitor-reset-http",
+                &"9".repeat(64),
+            ))
+            .unwrap();
+        let state = HttpState {
+            store: shared.clone(),
+            ..test_http_state()
+        };
+        let router = build_router(state);
+
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/monitor/reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/monitor/reset")
+                    .header(AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let snapshot: HubSnapshot = serde_json::from_slice(&body).unwrap();
+        assert!(snapshot.agents.is_empty());
+        assert_eq!(
+            shared
+                .0
+                .lock()
+                .unwrap()
+                .completion_inbox(0)
+                .completions
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn completion_sse_stream_receives_the_existing_accepted_event_path() {
         let shared = SharedStore(Arc::new(Mutex::new(EventStore::load(None))));
         let notifier = test_notifier();
@@ -4776,5 +5839,497 @@ mod tests {
                 .unwrap(),
             "http://tauri.localhost"
         );
+    }
+
+    #[test]
+    fn is_guardian_thread_classifies_only_exact_metadata() {
+        assert!(is_guardian_thread(
+            Some("subagent"),
+            Some(r#"{"subagent":{"other":"guardian"}}"#)
+        ));
+        assert!(is_guardian_thread(
+            Some("guardian_review"),
+            Some(r#"{"subagent":{"other":"guardian"}}"#)
+        ));
+        assert!(!is_guardian_thread(
+            Some("subagent"),
+            Some(r#"{"subagent":{"other":"vscode"}}"#)
+        ));
+        assert!(!is_guardian_thread(Some("subagent"), Some("vscode")));
+        assert!(!is_guardian_thread(Some("subagent"), None));
+        assert!(!is_guardian_thread(
+            None,
+            Some(r#"{"subagent":{"other":"guardian"}}"#)
+        ));
+        assert!(!is_guardian_thread(Some("subagent"), Some(r#"not json{"#)));
+        assert!(!is_guardian_thread(
+            Some("subagent"),
+            Some(r#"{"other":"guardian"}"#)
+        ));
+        assert!(is_guardian_thread(
+            Some("subagent"),
+            Some(r#"{"subagent":{"other":"guardian","extra":"key"}}"#)
+        ));
+        assert!(is_guardian_thread(
+            Some("subagent"),
+            Some(r#" { "subagent" : { "other" : "guardian" } } "#)
+        ));
+    }
+
+    #[test]
+    fn guardian_exclusion_covers_all_thread_states() {
+        let directory = temp_registry("guardian-all-states");
+        let database = directory.join("state_5.sqlite");
+        let index = directory.join("session_index.jsonl");
+        let connection = discovery_database(&database);
+        let now = Utc::now();
+
+        let old_ts = (now - chrono::Duration::hours(48)).timestamp_millis();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 1, 'subagent', \
+                         '{\"subagent\":{\"other\":\"guardian\"}}')",
+                rusqlite::params![
+                    "archived-guardian",
+                    r"C:\Projects\PetCrew",
+                    old_ts / 1000,
+                    old_ts
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 'guardian_review', \
+                         '{\"subagent\":{\"other\":\"guardian\"}}')",
+                rusqlite::params![
+                    "recent-guardian-root",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 'subagent', \
+                         '{\"subagent\":{\"other\":\"guardian\"}}')",
+                rusqlite::params![
+                    "guardian-child-thread",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO thread_spawn_edges \
+                 (parent_thread_id, child_thread_id, status) \
+                 VALUES (?1, ?2, 'open')",
+                rusqlite::params!["recent-guardian-root", "guardian-child-thread"],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 'subagent', 'vscode')",
+                rusqlite::params![
+                    "delegated-root",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived) \
+                 VALUES (?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![
+                    "real-root",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived) \
+                 VALUES (?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![
+                    "real-child",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO thread_spawn_edges \
+                 (parent_thread_id, child_thread_id, status) \
+                 VALUES (?1, ?2, 'open')",
+                rusqlite::params!["real-root", "real-child"],
+            )
+            .unwrap();
+
+        fs::write(
+            &index,
+            r#"{"id":"real-root","thread_name":"Живая задача","updated_at":1}
+{"id":"delegated-root","thread_name":"Делегированная","updated_at":1}
+{"id":"real-child","thread_name":"Помощник","updated_at":1}"#,
+        )
+        .unwrap();
+
+        let scan = discover_codex_tasks(&database, &index, now).unwrap();
+
+        assert_eq!(scan.events.len(), 3);
+        let event_keys: HashSet<_> = scan.events.iter().map(|e| e.key()).collect();
+        assert!(event_keys.contains(&recover_codex_root_key("real-root")));
+        assert!(event_keys.contains(&recover_codex_root_key("delegated-root")));
+
+        let child_key = recover_codex_child_key("real-root", "real-child");
+        assert!(event_keys.contains(&child_key));
+
+        assert_eq!(scan.excluded_keys.len(), 4);
+        assert!(scan
+            .excluded_keys
+            .contains(&recover_codex_root_key("archived-guardian")));
+        assert!(scan
+            .excluded_keys
+            .contains(&recover_codex_root_key("recent-guardian-root")));
+        assert!(scan
+            .excluded_keys
+            .contains(&recover_codex_root_key("guardian-child-thread")));
+        assert!(scan.excluded_keys.contains(&recover_codex_child_key(
+            "recent-guardian-root",
+            "guardian-child-thread"
+        )));
+
+        let child_event = scan.events.iter().find(|e| e.key() == child_key).unwrap();
+        assert_eq!(
+            child_event.parent_agent_id,
+            Some(format!("bootstrap-root:{}", opaque_digest("real-root")))
+        );
+        assert!(child_event
+            .payload
+            .navigation
+            .as_ref()
+            .is_some_and(|n| n.target == "real-child"));
+
+        drop(connection);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn import_codex_tasks_removes_old_archived_guardians() {
+        let directory = temp_registry("guardian-import-cleanup");
+        let database = directory.join("state_5.sqlite");
+        let index = directory.join("session_index.jsonl");
+        let cache_path = directory.join("hub-cache.json");
+        let connection = discovery_database(&database);
+        let now = Utc::now();
+
+        let old_ts = (now - chrono::Duration::hours(48)).timestamp_millis();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 1, 'subagent', \
+                         '{\"subagent\":{\"other\":\"guardian\"}}')",
+                rusqlite::params![
+                    "old-archived-guardian",
+                    r"C:\Projects\PetCrew",
+                    old_ts / 1000,
+                    old_ts
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived, thread_source, source) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 'subagent', \
+                         '{\"subagent\":{\"other\":\"guardian\"}}')",
+                rusqlite::params![
+                    "recent-guardian",
+                    r"C:\Projects\PetCrew",
+                    now.timestamp(),
+                    now.timestamp_millis()
+                ],
+            )
+            .unwrap();
+        let real_terminal_ts = (now - chrono::Duration::minutes(1)).timestamp_millis();
+        connection
+            .execute(
+                "INSERT INTO threads \
+                 (id, cwd, updated_at, updated_at_ms, archived) \
+                 VALUES (?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![
+                    "real-terminal",
+                    r"C:\Projects\PetCrew",
+                    real_terminal_ts / 1000,
+                    real_terminal_ts
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SharedStore(Arc::new(Mutex::new(EventStore::load(Some(
+            cache_path.clone(),
+        )))));
+        {
+            let mut s = store.0.lock().unwrap();
+            let guardian_old = recover_codex_root_key("old-archived-guardian");
+            let guardian_recent = recover_codex_root_key("recent-guardian");
+            let real_key = recover_codex_root_key("real-terminal");
+            let real_digest = opaque_digest("real-terminal");
+
+            s.agents.insert(
+                guardian_old.clone(),
+                AgentSnapshot {
+                    key: guardian_old,
+                    provider: Provider::Codex,
+                    session_id: "session:guard-old".to_string(),
+                    agent_id: "bootstrap-root:guard-old".to_string(),
+                    parent_agent_id: None,
+                    project: "PetCrew".to_string(),
+                    task: "Guardian old".to_string(),
+                    phase: AgentPhase::Completed,
+                    progress: AgentProgress::unavailable(),
+                    change_summary: None,
+                    current_action: "Done".to_string(),
+                    started_at: None,
+                    result: None,
+                    unread: false,
+                    navigation: None,
+                    return_receipt: None,
+                    last_sequence: 1,
+                    updated_at: old_ts.to_string(),
+                },
+            );
+            s.agents.insert(
+                guardian_recent.clone(),
+                AgentSnapshot {
+                    key: guardian_recent,
+                    provider: Provider::Codex,
+                    session_id: "session:guard-recent".to_string(),
+                    agent_id: "bootstrap-root:guard-recent".to_string(),
+                    parent_agent_id: None,
+                    project: "PetCrew".to_string(),
+                    task: "Guardian recent".to_string(),
+                    phase: AgentPhase::Completed,
+                    progress: AgentProgress::unavailable(),
+                    change_summary: None,
+                    current_action: "Done".to_string(),
+                    started_at: None,
+                    result: None,
+                    unread: false,
+                    navigation: None,
+                    return_receipt: None,
+                    last_sequence: 2,
+                    updated_at: now.to_rfc3339(),
+                },
+            );
+            s.agents.insert(
+                real_key.clone(),
+                AgentSnapshot {
+                    key: real_key,
+                    provider: Provider::Codex,
+                    session_id: format!("session:{real_digest}"),
+                    agent_id: format!("bootstrap-root:{real_digest}"),
+                    parent_agent_id: None,
+                    project: "PetCrew".to_string(),
+                    task: "Real task".to_string(),
+                    phase: AgentPhase::Completed,
+                    progress: AgentProgress::unavailable(),
+                    change_summary: None,
+                    current_action: "Finished".to_string(),
+                    started_at: None,
+                    result: None,
+                    unread: true,
+                    navigation: None,
+                    return_receipt: None,
+                    last_sequence: 3,
+                    updated_at: now.to_rfc3339(),
+                },
+            );
+
+            let mut completed =
+                recent_codex_completion("real-completion-event", &"a".repeat(64), &"b".repeat(64));
+            completed.payload.result.as_mut().unwrap().unread = false;
+            s.record_completion(&completed);
+            s.remember_event("replay-event-id".to_string());
+            s.persist();
+        }
+
+        let first = import_codex_tasks(&database, &index, &store, now);
+        assert!(first.is_some());
+        {
+            let s = store.0.lock().unwrap();
+            assert!(!s
+                .agents
+                .contains_key(&recover_codex_root_key("old-archived-guardian")));
+            assert!(!s
+                .agents
+                .contains_key(&recover_codex_root_key("recent-guardian")));
+            assert!(s
+                .agents
+                .contains_key(&recover_codex_root_key("real-terminal")));
+            assert_eq!(
+                s.agents[&recover_codex_root_key("real-terminal")].unread,
+                true
+            );
+            assert_eq!(s.completion_inbox(0).completions.len(), 1);
+            assert!(s.seen_event_ids.contains("replay-event-id"));
+        }
+
+        let second = import_codex_tasks(&database, &index, &store, now);
+        assert!(second.is_none());
+
+        drop(store);
+        let reloaded = SharedStore(Arc::new(Mutex::new(EventStore::load(Some(
+            cache_path.clone(),
+        )))));
+        {
+            let s = reloaded.0.lock().unwrap();
+            assert!(!s
+                .agents
+                .contains_key(&recover_codex_root_key("old-archived-guardian")));
+            assert!(!s
+                .agents
+                .contains_key(&recover_codex_root_key("recent-guardian")));
+            assert!(s
+                .agents
+                .contains_key(&recover_codex_root_key("real-terminal")));
+            assert_eq!(s.completion_inbox(0).completions.len(), 1);
+            assert!(s.seen_event_ids.contains("replay-event-id"));
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn incremental_scan_does_not_skip_task_complete_written_across_two_flushes() {
+        use std::io::Write as _;
+
+        let directory = temp_registry("rollout-split-complete");
+        let sessions = directory.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout.jsonl");
+
+        let started = concat!(
+            "{\"timestamp\":\"2026-09-14T10:00:00Z\",\"type\":\"event_msg\",",
+            "\"payload\":{\"type\":\"task_started\",\"turn_id\":\"split-turn\"}}\n"
+        );
+        fs::write(&rollout, started).unwrap();
+
+        let initial = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(initial.is_working(), Some(true));
+
+        let partial_complete = concat!(
+            "{\"timestamp\":\"2026-09-14T10:05:00Z\",\"type\":\"event_msg\",",
+            "\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"split"
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(partial_complete.as_bytes())
+            .unwrap();
+
+        let mid = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(mid.is_working(), Some(true));
+
+        let rest = "-turn\"}}\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(rest.as_bytes())
+            .unwrap();
+
+        let final_state = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(final_state.is_working(), Some(false));
+        assert_eq!(final_state.completed_turn.as_deref(), Some("split-turn"));
+        assert_eq!(
+            final_state.completed_at.as_deref(),
+            Some("2026-09-14T10:05:00Z")
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ordinary_complete_incremental_records_are_recognized_without_replay() {
+        use std::io::Write as _;
+
+        let directory = temp_registry("rollout-incremental-complete");
+        let sessions = directory.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join("rollout.jsonl");
+
+        let first = concat!(
+            "{\"timestamp\":\"2026-09-14T11:00:00Z\",\"type\":\"event_msg\",",
+            "\"payload\":{\"type\":\"task_started\",\"turn_id\":\"inc-turn-1\"}}\n"
+        );
+        fs::write(&rollout, first).unwrap();
+
+        let after_first = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(after_first.is_working(), Some(true));
+        assert_eq!(
+            after_first.started_at.as_deref(),
+            Some("2026-09-14T11:00:00Z")
+        );
+
+        let second = concat!(
+            "{\"timestamp\":\"2026-09-14T11:05:00Z\",\"type\":\"event_msg\",",
+            "\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"inc-turn-1\"}}\n"
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(second.as_bytes())
+            .unwrap();
+
+        let after_second = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(after_second.is_working(), Some(false));
+        assert_eq!(after_second.completed_turn.as_deref(), Some("inc-turn-1"));
+        assert_eq!(
+            after_second.completed_at.as_deref(),
+            Some("2026-09-14T11:05:00Z")
+        );
+
+        let third = concat!(
+            "{\"timestamp\":\"2026-09-14T11:10:00Z\",\"type\":\"event_msg\",",
+            "\"payload\":{\"type\":\"task_started\",\"turn_id\":\"inc-turn-2\"}}\n"
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(third.as_bytes())
+            .unwrap();
+
+        let after_third = rollout_state(&rollout, &sessions).unwrap();
+        assert_eq!(after_third.is_working(), Some(true));
+        assert_eq!(
+            after_third.started_at.as_deref(),
+            Some("2026-09-14T11:10:00Z")
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

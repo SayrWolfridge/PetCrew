@@ -1,0 +1,4 @@
+interface:
+  display_name: "Delegate to OpenCode"
+  short_description: "Безопасно отправляет задачи OpenCode с возвратом в Codex"
+  default_prompt: "Передай эту задачу OpenCode и верни результат в текущую задачу Codex."

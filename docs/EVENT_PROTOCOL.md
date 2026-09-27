@@ -326,3 +326,22 @@ cursor, then waits for new records from the same accepted-event path. Keepalives
 The stream is only a current-connection convenience. A closed Codex turn cannot be awakened by MCP
 alone, so consumers must use the sticky inbox on their next invocation. Reading either endpoint is
 read-only and never acknowledges a PetCrew card.
+
+### Exact OpenCode return pickup
+
+Job to be done: from a saved Relay result card, reach the exact originating Codex task with the
+exact OpenCode terminal receipt, without retrying a Desktop-owned writer or losing the result.
+The Relay return journal is authoritative for receipt identity and delivery state; Monitor is a
+local presentation of its status. A Relay `agent.discovered` event may include
+`payload.return_receipt` only when an OpenCode return has been durably saved as
+`monitor_pickup_ready` with `phase=completed`: `{session_id, completion_id, phase, workspace}`.
+This field is absent on pending, Codex-to-Codex, failed, historical, and unrelated cards. Core validates and retains only
+this bounded identity, not prompt text or transcript content.
+
+The Monitor pickup action copies an exact read request and opens the `navigation.kind=task` source
+task. It does not send a message, start a model, acknowledge the result, mark the Relay receipt
+delivered, or mutate provider state. Lisa pastes the request in that task; Codex reads the exact
+receipt there. `Очистить всё` remains presentation-only and never retries or discards returns.
+Acceptance requires one eligible card to expose the action with exact identity; ineligible cards
+must not. A click must copy the exact request and open only the bound source task, with a visible
+failure if clipboard or navigation fails. Existing replay and reset behavior must remain intact.

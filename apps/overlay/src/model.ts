@@ -171,6 +171,30 @@ export function sortAgents(agents: DemoAgent[]): DemoAgent[] {
   });
 }
 
+export interface AgentProjectGroup {
+  project: string;
+  agents: DemoAgent[];
+}
+
+export function groupAgentsByProject(agents: DemoAgent[]): AgentProjectGroup[] {
+  const groups = new Map<string, DemoAgent[]>();
+  for (const agent of agents) {
+    const project = agent.project.trim() || "Без проекта";
+    const group = groups.get(project);
+    if (group) group.push(agent);
+    else groups.set(project, [agent]);
+  }
+
+  return [...groups.entries()]
+    .map(([project, projectAgents]) => ({ project, agents: projectAgents }))
+    .sort((left, right) => {
+      const leftPriority = Math.min(...left.agents.map(phasePriority));
+      const rightPriority = Math.min(...right.agents.map(phasePriority));
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      return left.project.localeCompare(right.project, "ru");
+    });
+}
+
 export function selectVisibleAgents(
   agents: DemoAgent[],
   recentCompletedLimit = DEFAULT_RECENT_COMPLETED,
@@ -201,6 +225,23 @@ export function selectVisibleAgents(
 
 export function selectLiveAgents(agents: DemoAgent[]): DemoAgent[] {
   return agents.filter((agent) => agent.provider !== "simulator");
+}
+
+export type TeamStatusFilter = "working" | "waiting" | "done" | "blocked";
+
+export function filterAgentsByTeamStatus(
+  agents: DemoAgent[],
+  filter: TeamStatusFilter | null,
+): DemoAgent[] {
+  if (filter === null) return agents;
+  return agents.filter((agent) => {
+    if (filter === "working") return agent.phase === "working" || agent.phase === "planning";
+    if (filter === "waiting") {
+      return agent.phase === "waiting_input" || agent.phase === "waiting_approval";
+    }
+    if (filter === "done") return agent.phase === "completed";
+    return agent.phase === "blocked" || (agent.phase === "failed" && agent.unread === true);
+  });
 }
 
 export function teamMood(agents: DemoAgent[]): TeamMood {

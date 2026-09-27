@@ -30,6 +30,21 @@ headless Core. Only one Core may own the runtime descriptor and recovery loop at
 
 ## Components
 
+### Local working baseline
+
+Core ownership is protected by a retained Windows lock-file handle; numeric PID text is diagnostic
+and does not establish ownership. A reused unrelated PID must not prevent Core startup.
+
+Monitor reset uses authenticated `POST /v1/monitor/reset`. It clears the card snapshot while
+preserving completion receipts and replay protection. Summary filters are presentation-only.
+
+The OpenCode adapter retains an early idle for the current active turn when the assistant receipt
+is not yet complete. A matching late completed assistant closes that turn once; newer user activity
+or failure invalidates pending idle. This does not add a watcher or model polling.
+
+Relay remains a separate local Bridge component consuming Core completions. Its new queue and
+visibility work and the guardian-card repair are separate workstreams, not part of this baseline.
+
 ### Overlay UI
 
 Responsibilities:
@@ -109,7 +124,9 @@ record per opaque agent under `agent-registry/` in the same Tauri local-data dir
 minimal state registry, not a transcript or event log. The hub imports fresh records at startup and
 every five seconds, so PetCrew can reopen after being closed without model calls or private Codex
 inspection. Active records expire after 24 hours without updates; terminal registry files expire
-after seven days. Clearing the hub also clears this PetCrew-owned registry.
+after seven days. The Monitor reset clears the visible in-memory agent set and persists that empty
+presentation snapshot; it deliberately retains the registry, completion journal, Relay state, and
+other recovery evidence.
 
 Tasks that already existed before hooks were loaded are bootstrapped directly by the desktop hub
 from the local Codex state index in read-only mode. The hub selects only recent non-archived root
@@ -123,11 +140,24 @@ that id to a Tauri command; Rust validates the UUID-like value, constructs the c
 `codex://threads/<thread-id>` URI, and asks Windows Explorer to open the registered Codex handler.
 OpenCode navigation uses the same explicit user-action boundary: the adapter supplies its current
 absolute session directory only as a provider navigation capability, and Rust validates and
-percent-encodes it into `opencode://open-project?directory=...`. OpenCode currently opens the
-project, not a guaranteed prior session. On Windows, PetCrew passes that URI directly to the
-verified standard per-user OpenCode Desktop executable. It does not rely on a registered Windows
-URI handler because the installed application may parse deep-link arguments without registering
-the `opencode` protocol.
+percent-encodes it into `opencode://open-project?directory=...`. On Windows, PetCrew passes that URI
+directly to the verified standard per-user OpenCode Desktop executable. It does not rely on a
+registered Windows URI handler because the installed application may parse deep-link arguments
+without registering the `opencode` protocol. OpenCode Desktop 1.18.30 and 1.18.32 consume the URI
+through their `second-instance` handler but drop the initial URI on a cold Windows launch. PetCrew
+therefore checks whether the exact standard executable is already running before the first dispatch
+and, only when it was not running, replays the same URI once after Desktop initialization. This
+pre-launch probe avoids relying on the short-lived Electron launcher process to classify a cold
+start. In 1.18.32 the new layout does not subscribe to the delivered event, so successful dispatch
+does not establish successful navigation. After dispatch on Windows, PetCrew therefore uses the
+native accessibility tree as a bounded compatibility route: it accepts exactly one visible
+`OpenCode` window owned by the verified standard executable, opens Home through its toggle pattern,
+limits candidates to the `PetCrew Relay` server section, and invokes exactly one project button
+whose accessible name matches the validated directory basename. Missing or ambiguous controls fail
+closed. The project must already be registered in that OpenCode client: this compatibility route
+selects an existing project and never creates or registers a missing one. This route sends no
+keyboard text, mouse coordinates, prompt content, or session identifier; it selects the project only
+and cannot resume a specific OpenCode session.
 Navigation targets are stripped before hub-cache persistence.
 
 Accepted OpenCode terminal events also append a minimal completion record to the hub cache. This

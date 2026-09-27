@@ -20,7 +20,7 @@ source-level inventory; the exact resolved versions are authoritative in
 | `esbuild` | 0.28.1 | MIT |
 | `typescript` | 7.0.2 | Apache-2.0 |
 | `vite` | 8.1.5 | MIT |
-| `vitest` | 4.1.10 | MIT |
+| `vitest` | 4.1.11 | MIT |
 
 The current npm lockfile also contains transitive packages declared under MIT,
 Apache-2.0, Apache-2.0 OR MIT, MPL-2.0, BSD-3-Clause, ISC, and 0BSD. In
@@ -34,6 +34,7 @@ MPL-2.0. Those packages are not relicensed by PetCrew's MIT license.
 | `axum` | 0.8.9 | MIT |
 | `chrono` | 0.4.45 | MIT OR Apache-2.0 |
 | `futures-util` | 0.3.32 | MIT OR Apache-2.0 |
+| `notify` | 8.2.0 | CC0-1.0 |
 | `rand` | 0.9.5 | MIT OR Apache-2.0 |
 | `rusqlite` | 0.37.0 | MIT |
 | `serde` | 1.0.228 | MIT OR Apache-2.0 |
@@ -42,7 +43,9 @@ MPL-2.0. Those packages are not relicensed by PetCrew's MIT license.
 | `tauri` | 2.11.5 | Apache-2.0 OR MIT |
 | `tokio` | 1.53.0 | MIT |
 | `tower-http` | 0.7.0 | MIT |
+| `uiautomation` | 0.25.1 | Apache-2.0 |
 | `url` | 2.5.8 | MIT OR Apache-2.0 |
+| `windows-sys` | 0.61.2 | MIT OR Apache-2.0 |
 | `tower` (tests) | 0.5.3 | MIT |
 | `tauri-build` | 2.6.3 | Apache-2.0 OR MIT |
 

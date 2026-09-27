@@ -229,7 +229,7 @@ test("final diff failure never blocks completion", async () => {
   assert.equal(sent[1].event_type, "agent.completed")
 })
 
-test("does not complete when idle follows only a new user message", async () => {
+test("completes once when assistant metadata arrives after idle", async () => {
   const { sent, mapper } = harness()
   mapper.remember({ id: "root", title: "Задача", directory: "C:\\Work\\PetCrew" })
   await mapper.processEvent(event("session.status", { sessionID: "root", status: { type: "busy" } }))
@@ -242,6 +242,38 @@ test("does not complete when idle follows only a new user message", async () => 
     },
   }))
   await mapper.processEvent(event("session.idle", { sessionID: "root" }))
+
+  assert.deepEqual(sent.map((item) => item.event_type), ["agent.started"])
+
+  await mapper.processEvent(completedAssistant("root", "msg-assistant-late", "msg-user-only"))
+  assert.deepEqual(sent.map((item) => item.event_type), ["agent.started", "agent.completed"])
+
+  await mapper.processEvent(completedAssistant("root", "msg-assistant-late", "msg-user-only"))
+  assert.deepEqual(sent.map((item) => item.event_type), ["agent.started", "agent.completed"])
+})
+
+test("a pending idle cannot close a newer user turn", async () => {
+  const { sent, mapper } = harness()
+  mapper.remember({ id: "root", title: "Задача", directory: "C:\\Work\\PetCrew" })
+  await mapper.processEvent(event("session.status", { sessionID: "root", status: { type: "busy" } }))
+  await mapper.processEvent(event("message.updated", {
+    info: {
+      id: "msg-user-old",
+      sessionID: "root",
+      role: "user",
+      time: { created: Date.parse("2026-07-19T18:00:00.000Z") },
+    },
+  }))
+  await mapper.processEvent(event("session.idle", { sessionID: "root" }))
+  await mapper.processEvent(event("message.updated", {
+    info: {
+      id: "msg-user-new",
+      sessionID: "root",
+      role: "user",
+      time: { created: Date.parse("2026-07-19T18:00:03.000Z") },
+    },
+  }))
+  await mapper.processEvent(completedAssistant("root", "msg-assistant-old", "msg-user-old"))
 
   assert.deepEqual(sent.map((item) => item.event_type), ["agent.started"])
 })

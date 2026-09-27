@@ -6,6 +6,13 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gitSafeDirectory = $repoRoot.Replace('\', '/')
 
+if ($PublicAudit) {
+    $isShallow = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-parse --is-shallow-repository
+    if ($LASTEXITCODE -ne 0 -or "$isShallow".Trim().ToLowerInvariant() -ne 'false') {
+        throw 'Public history audit requires a complete, non-shallow repository'
+    }
+}
+
 function Invoke-RepositoryStep {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
@@ -30,8 +37,9 @@ Invoke-RepositoryStep "UI tests" "$repoRoot\apps\overlay" { npm test -- --run }
 Invoke-RepositoryStep "Web build" "$repoRoot\apps\overlay" { npm run build }
 Invoke-RepositoryStep "Rust format" "$repoRoot\apps\overlay\src-tauri" { cargo fmt --check }
 Invoke-RepositoryStep "Rust tests" "$repoRoot\apps\overlay\src-tauri" { cargo test }
-Invoke-RepositoryStep "Codex bridge tests" $repoRoot { python -m unittest discover -s plugins\petcrew\tests }
+Invoke-RepositoryStep "Codex plugin tests" $repoRoot { python -m unittest discover -s plugins\petcrew\tests }
 Invoke-RepositoryStep "OpenCode adapter tests" $repoRoot { node --test adapters\opencode\petcrew.test.mjs }
+Invoke-RepositoryStep "Bridge and Relay tests" $repoRoot { python -B -m unittest discover -s plugins\opencode-bridge\tests }
 
 Write-Host "[JSON syntax]"
 python "$repoRoot\tools\validate_json.py" $repoRoot
@@ -94,6 +102,35 @@ if ($localPathHits) {
 }
 if ($sensitiveContentHits) {
     throw "Sensitive-looking content remains in publishable files: $($sensitiveContentHits -join ', ')"
+}
+
+Write-Host "[Pinned workflow actions]"
+$mutableActionRefs = @()
+$workflowRoot = Join-Path $repoRoot '.github\workflows'
+if (Test-Path -LiteralPath $workflowRoot -PathType Container) {
+    $workflowFiles = Get-ChildItem -LiteralPath $workflowRoot -File | Where-Object {
+        $_.Extension -in @('.yaml', '.yml')
+    }
+    foreach ($workflowFile in $workflowFiles) {
+        $lineNumber = 0
+        foreach ($line in Get-Content -LiteralPath $workflowFile.FullName -Encoding UTF8) {
+            $lineNumber += 1
+            if ($line -notmatch '^\s*(?:-\s*)?uses:\s*(?<reference>\S+)') {
+                continue
+            }
+            $reference = $Matches.reference.Trim([char[]]@(39, 34))
+            if ($reference.StartsWith('./') -or $reference.StartsWith('docker://')) {
+                continue
+            }
+            if ($reference -notmatch '^[^@\s]+@[0-9a-fA-F]{40}$') {
+                $relativeWorkflow = [System.IO.Path]::GetRelativePath($repoRoot, $workflowFile.FullName)
+                $mutableActionRefs += "$relativeWorkflow`:$lineNumber ($reference)"
+            }
+        }
+    }
+}
+if ($mutableActionRefs) {
+    throw "GitHub Actions must use immutable commit SHAs: $($mutableActionRefs -join ', ')"
 }
 
 if ($PublicAudit) {
