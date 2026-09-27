@@ -163,11 +163,39 @@ if ($PublicAudit) {
 
     $expectedPublicEmail = 'noreply' + '@' + 'petcrew.invalid'
     $expectedPublicIdentity = "PetCrew|$expectedPublicEmail|PetCrew|$expectedPublicEmail"
+    $pullRequestMergeCommit = $null
+    if ("$env:GITHUB_EVENT_NAME" -eq 'pull_request') {
+        if ("$env:GITHUB_REF" -notmatch '^refs/pull/[1-9][0-9]*/merge$') {
+            throw 'GitHub pull-request audit is not running on a merge ref'
+        }
+
+        $headCommit = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-parse --verify HEAD
+        $headCommitStatus = $LASTEXITCODE
+        $headWithParents = git -c "safe.directory=$gitSafeDirectory" -C $repoRoot rev-list --parents -n 1 HEAD
+        $headWithParentsStatus = $LASTEXITCODE
+        $headParts = @("$headWithParents".Trim() -split '\s+')
+        if (
+            $headCommitStatus -ne 0 -or
+            $headWithParentsStatus -ne 0 -or
+            $headParts.Count -ne 3 -or
+            -not [string]::Equals("$env:GITHUB_SHA", "$headCommit".Trim(), [System.StringComparison]::OrdinalIgnoreCase)
+        ) {
+            throw 'GitHub pull-request audit could not prove an ephemeral merge commit'
+        }
+        $pullRequestMergeCommit = "$headCommit".Trim()
+    }
+
+    $publicIdentityRows = @(
+        git -c "safe.directory=$gitSafeDirectory" -C $repoRoot log --all --format='%H|%an|%ae|%cn|%ce'
+    )
+    $publicIdentityStatus = $LASTEXITCODE
     $publicIdentities = @(
-        git -c "safe.directory=$gitSafeDirectory" -C $repoRoot log --all --format='%an|%ae|%cn|%ce' |
+        $publicIdentityRows |
+            Where-Object { -not $pullRequestMergeCommit -or -not $_.StartsWith("$pullRequestMergeCommit|") } |
+            ForEach-Object { $_.Substring($_.IndexOf('|') + 1) } |
             Sort-Object -Unique
     )
-    if ($LASTEXITCODE -ne 0 -or $publicIdentities.Count -ne 1 -or $publicIdentities[0] -ne $expectedPublicIdentity) {
+    if ($publicIdentityStatus -ne 0 -or $publicIdentities.Count -ne 1 -or $publicIdentities[0] -ne $expectedPublicIdentity) {
         throw 'Public history contains non-project Git author metadata'
     }
 
