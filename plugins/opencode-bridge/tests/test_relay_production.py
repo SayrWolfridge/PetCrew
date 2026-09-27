@@ -135,7 +135,10 @@ class ProductionTests(unittest.TestCase):
         self.o.process_completion_record(self.event())
         pending = list(self.j.outbox_dir().rglob('*.json'))
         self.assertEqual(len(pending), 5)
-        self.assertNotIn('Use opencode_read_session', ''.join(p.read_text() for p in pending))
+        self.assertNotIn(
+            'Use opencode_read_session',
+            ''.join(p.read_text(encoding='utf-8') for p in pending),
+        )
         self.engine._publisher = self.publish
         self.engine.recover()
         self.assertEqual(len(self.calls), 1)

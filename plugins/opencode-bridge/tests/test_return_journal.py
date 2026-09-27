@@ -890,7 +890,7 @@ class ProductionEntrypointTests(unittest.TestCase):
             "session_id": "ses_test_ep",
             "completion_id": COMPLETION_ID_1,
             "phase": "completed",
-            "workspace": self._tmpdir,
+            "workspace": binding["workspace"],
         })
         self.assertEqual(
             pickup_events[0]["payload"]["navigation"]["target"],
